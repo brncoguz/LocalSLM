@@ -3,24 +3,6 @@
 A lab bench for small language models running entirely on your own machine.
 Chat with them, and measure them properly while you do.
 
-```
-  Apple M1 Pro · 16 GB    1.8 GB free · runner 3.6 GB    181 GB free    AC    ollama 0.32.9
-
-  llama3.2:3b  Q4_K_M · 2.0 GB · warm
-
-  > A shop sells pens at 3 for $2. How much do 21 pens cost?
-
-  $15
-
-  0.20 s to answer · 79.3 tok/s · 26 in · 3 out
-```
-
-That answer is wrong — it's $14. It arrived in a fifth of a second, roughly 200×
-faster than the model that got it right.
-
-Measuring one of those things without the other is how people pick local models
-badly. This tool measures both.
-
 ## Why
 
 There are real situations where a hosted API isn't an option: privacy rules that
