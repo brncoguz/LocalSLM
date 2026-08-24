@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, ChevronRight, Loader2, Play, XCircle } from "lucide-react";
+import {
+  AlertTriangle, CheckCircle2, ChevronRight, Loader2, Play, Trash2, XCircle,
+} from "lucide-react";
 import {
   api, streamGet, type CellResult, type RunDetail, type RunRow, type SuiteInfo,
 } from "@/lib/api";
@@ -175,7 +177,8 @@ export function Bench({ models }: { models: string[] }) {
             {runs.map((r) => (
               <RunCard key={r.id} run={r}
                 open={openRun === r.id}
-                onToggle={() => setOpenRun(openRun === r.id ? null : r.id)} />
+                onToggle={() => setOpenRun(openRun === r.id ? null : r.id)}
+                onDeleted={() => { setOpenRun(null); void refresh(); }} />
             ))}
           </div>
         </section>
@@ -214,34 +217,80 @@ function Picker({
   );
 }
 
-function RunCard({ run, open, onToggle }: { run: RunRow; open: boolean; onToggle: () => void }) {
+function RunCard({
+  run, open, onToggle, onDeleted,
+}: {
+  run: RunRow; open: boolean; onToggle: () => void; onDeleted: () => void;
+}) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
   useEffect(() => {
     if (open && !detail) void api.run(run.id).then(setDetail);
   }, [open, detail, run.id]);
 
+  async function remove() {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.deleteRun(run.id);
+      onDeleted();
+    } catch (e: any) {
+      setErr(e?.detail?.message ?? "Could not delete this run.");
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
   const tone = run.status === "done" ? "good" : run.status === "running" ? "accent" : "bad";
   return (
     <div className="rounded-lg border border-border bg-surface">
-      <button onClick={onToggle} className="flex w-full items-center gap-3 px-3 py-2.5 text-left">
-        <ChevronRight size={13} className={cn("shrink-0 text-faint transition-transform", open && "rotate-90")} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[12px] font-medium">{run.suite}</span>
-            <Badge tone={tone as never}>{run.status}</Badge>
-            {run.label && <Badge>{run.label}</Badge>}
+      <div className="flex items-center gap-1 pr-2">
+        <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left">
+          <ChevronRight size={13} className={cn("shrink-0 text-faint transition-transform", open && "rotate-90")} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[12px] font-medium">{run.suite}</span>
+              <Badge tone={tone as never}>{run.status}</Badge>
+              {run.label && <Badge>{run.label}</Badge>}
+            </div>
+            <div className="tnum mt-0.5 flex flex-wrap gap-2 text-[11px] text-faint">
+              <span>{new Date(run.ts * 1000).toLocaleString()}</span>
+              <span>{run.done_units}/{run.planned_units} items</span>
+              {run.elapsed_s != null && <span>{run.elapsed_s.toFixed(0)}s</span>}
+              <span>{run.models.length} models</span>
+            </div>
           </div>
-          <div className="tnum mt-0.5 flex flex-wrap gap-2 text-[11px] text-faint">
-            <span>{new Date(run.ts * 1000).toLocaleString()}</span>
-            <span>{run.done_units}/{run.planned_units} items</span>
-            {run.elapsed_s != null && <span>{run.elapsed_s.toFixed(0)}s</span>}
-            <span>{run.models.length} models</span>
+          {run.best_score != null && (
+            <span className="tnum shrink-0 text-sm font-semibold">{run.best_score.toFixed(2)}</span>
+          )}
+        </button>
+        <Button size="icon" variant="ghost" title="Delete this run"
+          disabled={busy} onClick={() => setConfirming(true)}>
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+        </Button>
+      </div>
+
+      {confirming && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-bad/25 bg-bad/8 px-3 py-2 text-[11px]">
+          <AlertTriangle size={13} className="shrink-0 text-bad" />
+          <span className="text-muted">
+            {/* A run *is* its measurements, unlike a chat session where the
+                transcript is disposable and the measurement is the artifact. */}
+            Delete this run and its {run.done_units} measurements? They disappear
+            from the Stats charts too.
+          </span>
+          <div className="ml-auto flex gap-1">
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>Cancel</Button>
+            <Button size="sm" variant="danger" onClick={() => void remove()}>Delete</Button>
           </div>
         </div>
-        {run.best_score != null && (
-          <span className="tnum shrink-0 text-sm font-semibold">{run.best_score.toFixed(2)}</span>
-        )}
-      </button>
+      )}
+
+      {err && <p className="border-t border-border px-3 py-1.5 text-[11px] text-bad">{err}</p>}
+
       {open && (
         <div className="border-t border-border p-3">
           {detail ? <RunCells cells={detail.cells} /> : <p className="text-[11px] text-faint">Loading…</p>}

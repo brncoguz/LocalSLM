@@ -7,11 +7,12 @@ different machine.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from sqlite3 import Connection
 
 from localslm.config import Config, load_config
-from localslm.db import connect, record_env
+from localslm.db import connect, record_env, write
 from localslm.host import HostInfo, host_info
 from localslm.inference.lock import InferenceLease
 from localslm.runtimes.ollama import OllamaRuntime
@@ -51,8 +52,25 @@ def init_state() -> AppState:
         env_hash=host.hash(),
     )
     record_env(conn, host.__dict__ | {"ollama_env": host.ollama_env}, state.env_hash)
+    reconcile_interrupted_runs(conn)
     _state = state
     return state
+
+
+def reconcile_interrupted_runs(conn: Connection) -> int:
+    """Close out runs left marked `running` by a process that died.
+
+    Nothing can still be running: this process has just started and holds no
+    lease. Leaving the rows as `running` would show a permanently in-flight
+    benchmark in the UI and hide the fact that its results are partial.
+    """
+    with write(conn):
+        cur = conn.execute(
+            "UPDATE runs SET status = 'aborted', abort_reason = 'interrupted', "
+            "finished_ts = ? WHERE status = 'running'",
+            (time.time(),),
+        )
+    return cur.rowcount
 
 
 def get_state() -> AppState:

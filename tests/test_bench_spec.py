@@ -112,3 +112,98 @@ class TestPressureLatch:
 
         source = inspect.getsource(BenchRunner.run)
         assert "reset_abort()" in source
+
+
+class TestRunDeletion:
+    """A benchmark run *is* its measurements, so deleting one must take the
+    `requests` rows with it. Left behind they would keep skewing the Stats
+    charts with no run to trace them back to."""
+
+    def test_delete_removes_every_table_belonging_to_the_run(self, conn):
+        from localslm.db import insert
+
+        insert(conn, "runs", {"id": "r1", "ts": 1.0, "suite": "math", "status": "done"})
+        insert(conn, "runs", {"id": "r2", "ts": 2.0, "suite": "math", "status": "done"})
+        for run_id in ("r1", "r2"):
+            insert(
+                conn,
+                "requests",
+                {
+                    "id": f"req-{run_id}",
+                    "ts": 1.0,
+                    "kind": "bench",
+                    "run_id": run_id,
+                    "runtime": "ollama",
+                    "model": "m",
+                },
+            )
+            insert(
+                conn,
+                "results",
+                {
+                    "id": f"res-{run_id}",
+                    "run_id": run_id,
+                    "request_id": f"req-{run_id}",
+                    "model": "m",
+                    "item_id": "i1",
+                    "task": "numeric",
+                    "grader": "numeric",
+                },
+            )
+            insert(conn, "cells", {"run_id": run_id, "cell_key": "c1", "model": "m"})
+
+        for table in ("results", "cells", "samples", "requests"):
+            conn.execute(f"DELETE FROM {table} WHERE run_id = ?", ("r1",))
+        conn.execute("DELETE FROM runs WHERE id = ?", ("r1",))
+        conn.commit()
+
+        def count(table: str, run_id: str) -> int:
+            return conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE run_id = ?", (run_id,)
+            ).fetchone()[0]
+
+        assert count("requests", "r1") == 0
+        assert count("results", "r1") == 0
+        assert count("cells", "r1") == 0
+        # The other run is untouched.
+        assert count("requests", "r2") == 1
+        assert count("results", "r2") == 1
+
+    def test_chat_measurements_are_not_touched_by_run_deletion(self, conn):
+        """Chat rows have no run_id, so a run delete must never reach them."""
+        from localslm.db import insert
+
+        insert(
+            conn,
+            "requests",
+            {
+                "id": "chat1",
+                "ts": 1.0,
+                "kind": "chat",
+                "session_id": "s1",
+                "runtime": "ollama",
+                "model": "m",
+            },
+        )
+        conn.execute("DELETE FROM requests WHERE run_id = ?", ("r1",))
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1
+
+
+def test_interrupted_runs_are_closed_out_on_startup(conn):
+    """A process that dies mid-run leaves its row marked `running`. Nothing can
+    still be running once a new process starts, and a permanently in-flight row
+    hides the fact that the results are partial."""
+    from localslm.api.deps import reconcile_interrupted_runs
+    from localslm.db import insert
+
+    insert(conn, "runs", {"id": "live", "ts": 1.0, "suite": "math", "status": "running"})
+    insert(conn, "runs", {"id": "old", "ts": 2.0, "suite": "math", "status": "done"})
+
+    assert reconcile_interrupted_runs(conn) == 1
+    rows = {
+        r["id"]: (r["status"], r["abort_reason"])
+        for r in conn.execute("SELECT id, status, abort_reason FROM runs")
+    }
+    assert rows["live"] == ("aborted", "interrupted")
+    assert rows["old"] == ("done", None)  # finished runs are untouched

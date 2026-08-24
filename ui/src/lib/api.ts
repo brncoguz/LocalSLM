@@ -208,6 +208,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  deleteRun: (id: string) =>
+    json<{ deleted: string; requests: number; results: number; cells: number }>(
+      `/runs/${id}`,
+      { method: "DELETE" },
+    ),
   abortRun: (id: string) =>
     json<{ aborting: string }>(`/bench/runs/${id}/abort`, { method: "POST" }),
   activeRun: () => json<{ run_id: string } | null>("/bench/active"),

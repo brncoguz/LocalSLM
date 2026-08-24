@@ -21,6 +21,7 @@ from localslm.bench.spec import BenchSpec
 from localslm.bench.stats import Interval, paired_bootstrap, rank_with_ties
 from localslm.bench.suites import available, load
 from localslm.db import new_id, query
+from localslm.db import write as db_write
 from localslm.inference.lock import LeaseBusy
 
 router = APIRouter(tags=["bench"])
@@ -226,6 +227,46 @@ async def run_detail(run_id: str) -> dict:
         c["tied_with_previous"] = tied.get(c["cell_key"], False)
     run["cells"] = ranked
     return run
+
+
+@router.delete("/runs/{run_id}")
+async def delete_run(run_id: str) -> dict:
+    """Delete a run and everything it produced.
+
+    Unlike a chat session — where the transcript is disposable but the
+    measurement it produced is the valuable part — a benchmark run *is* its
+    measurements. Leaving its `requests` rows behind would orphan them: they
+    would keep skewing the Stats charts with no run left to trace them back to.
+    So this removes the run, its graded results, its frozen aggregates and its
+    raw requests together, and reports the counts so the UI can say what went.
+    """
+    st = get_state()
+    rows = query(st.conn, "SELECT status FROM runs WHERE id = ?", (run_id,))
+    if not rows:
+        raise HTTPException(404, "no such run")
+
+    active = _ACTIVE.get(run_id)
+    if rows[0]["status"] == "running" and active and not active["finished"]:
+        raise HTTPException(
+            409,
+            {
+                "error": "run_active",
+                "message": "That run is still going. Stop it first, then delete it.",
+            },
+        )
+
+    counted = {
+        table: query(
+            st.conn, f"SELECT COUNT(*) n FROM {table} WHERE run_id = ?", (run_id,)
+        )[0]["n"]
+        for table in ("requests", "results", "cells")
+    }
+    with db_write(st.conn):
+        for table in ("results", "cells", "samples", "requests"):
+            st.conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+        st.conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+    _ACTIVE.pop(run_id, None)
+    return {"deleted": run_id, **counted}
 
 
 @router.get("/runs/{run_id}/results")
