@@ -1,0 +1,11 @@
+line-length = 92
+target-version = "py313"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+# The formatter owns line length; B008 fights FastAPI's Depends() idiom.
+ignore = ["E501", "B008"]
+
+[lint.per-file-ignores]
+# conftest inserts src/ on sys.path before importing the package.
+"tests/conftest.py" = ["E402"]
