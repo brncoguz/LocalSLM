@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from localslm.runtimes.base import (
+    COLD_LOAD_MS_FALLBACK,
     Capabilities,
     Chunk,
     GenRequest,
@@ -252,6 +253,7 @@ class OllamaRuntime:
         result.total_ms = (time.perf_counter() - t_start) * 1000
         result.text = "".join(text)
         result.thinking = "".join(thinking)
-        # Ollama reports load_duration only when it actually loaded weights.
-        result.cold = bool(result.server and result.server.load_ms > 100)
+        # Best-effort only: MeasuredSession checks residency instead, which is
+        # authoritative. This path is for direct adapter use (tests, CLI probes).
+        result.cold = bool(result.server and result.server.load_ms > COLD_LOAD_MS_FALLBACK)
         return result

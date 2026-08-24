@@ -162,3 +162,68 @@ async def test_streaming_errors_land_on_the_row_rather_than_raising(conn, model_
     row = query(conn, "SELECT ok, error, finish_reason FROM requests")[0]
     assert row["ok"] == 0
     assert row["finish_reason"] == "error"
+
+
+class TestColdDetection:
+    """Ollama reports ~250 ms of handle setup even when weights are resident.
+    Trusting that number marks every request cold, which would silently void
+    the whole cold-start analysis."""
+
+    def test_residency_wins_over_load_duration(self):
+        from localslm.inference.session import _was_cold
+        from localslm.runtimes.base import ServerTiming
+
+        warm_looking_load = ServerTiming(load_ms=250.0)
+        assert _was_cold(pre_resident=True, server=warm_looking_load) is False
+        assert _was_cold(pre_resident=False, server=warm_looking_load) is True
+
+    def test_fallback_ignores_handle_setup_cost(self):
+        from localslm.inference.session import _was_cold
+        from localslm.runtimes.base import ServerTiming
+
+        # Observed on this machine: warm requests report 230-290 ms.
+        assert _was_cold(None, ServerTiming(load_ms=250.0)) is False
+        # Genuine cold loads measured 1.5-6.6 s.
+        assert _was_cold(None, ServerTiming(load_ms=3601.0)) is True
+
+    def test_fallback_without_server_timings_is_not_cold(self):
+        from localslm.inference.session import _was_cold
+
+        assert _was_cold(None, None) is False
+
+
+@pytest.mark.asyncio
+async def test_resident_model_is_recorded_warm(conn, model_ref):
+    """The end-to-end path: a resident model must land in the row as warm even
+    though Ollama reports a nonzero load_duration."""
+
+    class Resident(FakeRuntime):
+        async def loaded(self):
+            from localslm.runtimes.base import LoadedModel
+
+            return [LoadedModel(name=model_ref.name, size_bytes=1, size_vram_bytes=1)]
+
+    session = MeasuredSession(
+        Resident([(0.2, "", "x")], {**SERVER, "load_duration": 250_000_000}),
+        conn,
+        FakeSampler(clean_window()),
+    )
+    result = await session.generate(request(model_ref), Provenance(kind="chat"))
+    assert result.cold is False
+    assert query(conn, "SELECT cold FROM requests")[0]["cold"] == 0
+
+
+@pytest.mark.asyncio
+async def test_absent_model_is_recorded_cold(conn, model_ref):
+    class Empty(FakeRuntime):
+        async def loaded(self):
+            return []
+
+    session = MeasuredSession(
+        Empty([(0.2, "", "x")], {**SERVER, "load_duration": 3_601_000_000}),
+        conn,
+        FakeSampler(clean_window()),
+    )
+    result = await session.generate(request(model_ref), Provenance(kind="chat"))
+    assert result.cold is True
+    assert query(conn, "SELECT cold FROM requests")[0]["cold"] == 1

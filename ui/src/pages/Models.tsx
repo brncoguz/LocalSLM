@@ -8,6 +8,7 @@ import {
   type ModelsResponse, type PullProgress,
 } from "@/lib/api";
 import { Badge, Button, Card, Stat } from "@/components/ui/primitives";
+import { ModelDetail } from "@/components/ModelDetail";
 import { fmt, modelColor } from "@/lib/utils";
 
 type PullState = { progress: PullProgress | null; error: string | null; abort: AbortController };
@@ -19,6 +20,7 @@ export function Models({ data, refresh }: { data: ModelsResponse | null; refresh
   const [pulls, setPulls] = useState<Record<string, PullState>>({});
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [custom, setCustom] = useState("");
+  const [detail, setDetail] = useState<string | null>(null);
   const pullsRef = useRef(pulls);
   pullsRef.current = pulls;
 
@@ -96,6 +98,7 @@ export function Models({ data, refresh }: { data: ModelsResponse | null; refresh
               m={m}
               busy={busy === m.name}
               confirming={confirmDelete === m.name}
+              onOpen={() => setDetail(m.name)}
               onConfirm={() => setConfirmDelete(m.name)}
               onCancel={() => setConfirmDelete(null)}
               act={act}
@@ -161,15 +164,16 @@ export function Models({ data, refresh }: { data: ModelsResponse | null; refresh
             ))}
         </section>
       </div>
+      {detail && <ModelDetail name={detail} onClose={() => setDetail(null)} />}
     </div>
   );
 }
 
 function ModelTile({
-  m, busy, confirming, onConfirm, onCancel, act,
+  m, busy, confirming, onOpen, onConfirm, onCancel, act,
 }: {
   m: ModelCard; busy: boolean; confirming: boolean;
-  onConfirm: () => void; onCancel: () => void;
+  onOpen: () => void; onConfirm: () => void; onCancel: () => void;
   act: (n: string, fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const color = modelColor(m.name);
@@ -181,7 +185,9 @@ function ModelTile({
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h3 className="truncate text-sm font-semibold">{m.name}</h3>
+              <button onClick={onOpen} className="truncate text-sm font-semibold hover:underline">
+                {m.name}
+              </button>
               {m.state === "warm" ? (
                 <Badge tone="good"><Flame size={9} /> warm</Badge>
               ) : (

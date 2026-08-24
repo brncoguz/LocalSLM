@@ -20,6 +20,13 @@ from typing import Any, Literal, Protocol
 
 ThinkLevel = Literal["low", "medium", "high"]
 
+# Ollama reports a `load_duration` of ~230-290 ms even when the weights are
+# already resident — that is handle setup, not loading. Genuine cold loads on
+# this hardware run 1.5-6.6 s. A threshold anywhere near zero therefore marks
+# every request cold. Residency from /api/ps is authoritative; this is only the
+# fallback for when that lookup fails.
+COLD_LOAD_MS_FALLBACK = 1000.0
+
 
 @dataclass(frozen=True)
 class ModelRef:

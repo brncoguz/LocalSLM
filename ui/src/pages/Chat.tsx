@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Brain, ChevronDown, CornerDownLeft, Loader2 } from "lucide-react";
-import { streamPost, type ChatStats, type ModelCard } from "@/lib/api";
+import {
+  api, streamPost, type ChatStats, type ModelCard,
+  type SessionMessage, type SessionRow,
+} from "@/lib/api";
 import { Button } from "@/components/ui/primitives";
 import { StatStrip } from "@/components/StatStrip";
+import { SessionSidebar } from "@/components/SessionSidebar";
 import { cn, fmt, modelColor } from "@/lib/utils";
 
 type Msg = {
@@ -23,6 +27,31 @@ const THINK_OPTIONS = [
   { value: "high", label: "high" },
 ];
 
+/** Rebuild a stat strip from a stored request row.
+ *  Returns null for messages whose request predates a schema change or failed —
+ *  the strip is then simply absent rather than showing zeros. */
+function statsFromRow(m: SessionMessage): ChatStats | null {
+  if (m.total_ms == null) return null;
+  return {
+    ttft_ms: m.ttft_ms,
+    ttfat_ms: m.ttfat_ms,
+    total_ms: m.total_ms,
+    decode_tps: m.decode_tps,
+    prefill_tps: m.prefill_tps,
+    prompt_tokens: m.prompt_tokens,
+    output_tokens: m.output_tokens,
+    thinking_chunks: m.thinking_tokens ?? 0,
+    answer_chunks: m.answer_tokens ?? 0,
+    think_ratio:
+      (m.thinking_tokens ?? 0) + (m.answer_tokens ?? 0) > 0
+        ? (m.thinking_tokens ?? 0) / ((m.thinking_tokens ?? 0) + (m.answer_tokens ?? 0))
+        : null,
+    itl_stddev_ms: m.itl_stddev_ms,
+    cold: Boolean(m.cold),
+    load_ms: m.srv_load_ms,
+  };
+}
+
 export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: () => void }) {
   const [model, setModel] = useState<string>("");
   const [think, setThink] = useState("false");
@@ -33,7 +62,44 @@ export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: 
   const [live, setLive] = useState<{ tps: number | null; elapsed: number } | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
+
+  const loadSessions = useCallback(async () => {
+    try { setSessions(await api.sessions()); } catch { /* sidebar stays as-is */ }
+  }, []);
+
+  useEffect(() => { void loadSessions(); }, [loadSessions]);
+
+  /** Reopen a conversation with the measurements it was recorded with. */
+  async function openSession(id: string) {
+    try {
+      const { messages } = await api.session(id);
+      setSessionId(id);
+      setBanner(null);
+      setMsgs(
+        messages.map((m) => ({
+          role: m.role,
+          content: m.content ?? "",
+          thinking: m.thinking ?? undefined,
+          stats: m.role === "assistant" ? (statsFromRow(m) ?? undefined) : undefined,
+          requestId: m.request_id,
+          model: m.model ?? undefined,
+          error: m.error,
+        })),
+      );
+      const row = sessions.find((s) => s.id === id);
+      if (row?.model && models.some((mm) => mm.name === row.model)) setModel(row.model);
+    } catch {
+      setBanner("Couldn't load that conversation.");
+    }
+  }
+
+  function newChat() {
+    setSessionId(null);
+    setMsgs([]);
+    setBanner(null);
+  }
 
   useEffect(() => {
     if (!model && models.length) setModel(models[0].name);
@@ -88,12 +154,15 @@ export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: 
               streaming: false,
             }));
             onMeasured();
+            void loadSessions();
           }
         },
       );
     } catch (e: any) {
       const d = e?.detail;
-      if (d?.error === "benchmark_running") {
+      if (d?.error === "model_missing") {
+        setBanner(d.message ?? "That model isn't installed any more.");
+      } else if (d?.error === "benchmark_running") {
         setBanner(
           `A benchmark is running (${d.run_id ?? "unknown"}). Chat is blocked so its timings stay clean.`,
         );
@@ -108,7 +177,23 @@ export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: 
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full">
+      <SessionSidebar
+        sessions={sessions}
+        activeId={sessionId}
+        onSelect={(id) => void openSession(id)}
+        onNew={newChat}
+        onRename={async (id, title) => {
+          await api.renameSession(id, title);
+          void loadSessions();
+        }}
+        onDelete={async (id) => {
+          await api.deleteSession(id);
+          if (id === sessionId) newChat();
+          void loadSessions();
+        }}
+      />
+      <div className="flex min-w-0 flex-1 flex-col">
       {/* Header: model identity + decoding controls */}
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2.5">
         <div className="flex items-center gap-2">
@@ -236,6 +321,7 @@ export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: 
             Every message is recorded as a measurement — the numbers here are the ones the report uses.
           </p>
         </div>
+      </div>
       </div>
     </div>
   );

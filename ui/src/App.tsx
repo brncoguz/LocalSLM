@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { Boxes, MessageSquare, Activity } from "lucide-react";
+import { Activity, BarChart3, Boxes, MessageSquare } from "lucide-react";
 import { api, type Health, type ModelsResponse } from "@/lib/api";
 import { MachineStrip } from "@/components/MachineStrip";
 import { Chat } from "@/pages/Chat";
 import { Models } from "@/pages/Models";
+import { Stats } from "@/pages/Stats";
 import { cn } from "@/lib/utils";
 
-type Tab = "chat" | "models";
+type Tab = "chat" | "models" | "stats";
 
 const TABS: { id: Tab; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "models", label: "Models", icon: Boxes },
+  { id: "stats", label: "Stats", icon: BarChart3 },
 ];
 
 export default function App() {
@@ -65,8 +67,10 @@ export default function App() {
           <OllamaDown endpoint={health?.runtime.endpoint} />
         ) : tab === "chat" ? (
           <Chat models={models?.installed ?? []} onMeasured={refresh} />
-        ) : (
+        ) : tab === "models" ? (
           <Models data={models} refresh={refresh} />
+        ) : (
+          <Stats />
         )}
       </main>
     </div>

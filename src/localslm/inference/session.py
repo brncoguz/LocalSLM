@@ -17,7 +17,13 @@ from typing import Any
 
 from localslm.db import insert, new_id
 from localslm.host import power_state
-from localslm.runtimes.base import Chunk, GenRequest, GenResult, ServerTiming
+from localslm.runtimes.base import (
+    COLD_LOAD_MS_FALLBACK,
+    Chunk,
+    GenRequest,
+    GenResult,
+    ServerTiming,
+)
 from localslm.telemetry.sampler import SystemSampler
 
 # Full outputs are kept so a grader bugfix can re-score without re-running
@@ -65,6 +71,11 @@ class MeasuredSession:
         result = GenResult(model=req.model)
         text: list[str] = []
         thinking: list[str] = []
+
+        # Ask whether the weights are already resident *before* starting the
+        # clock, so this lookup never lands inside a latency measurement.
+        pre_resident = await self._is_resident(req.model.name)
+
         t_start = time.perf_counter()
         t_prev: float | None = None
 
@@ -101,10 +112,21 @@ class MeasuredSession:
         result.total_ms = (t_end - t_start) * 1000
         result.text = "".join(text)
         result.thinking = "".join(thinking)
-        result.cold = bool(result.server and result.server.load_ms > 100)
+        result.cold = _was_cold(pre_resident, result.server)
 
         self._persist(req, result, prov, t_start, t_end)
         yield None, result
+
+    async def _is_resident(self, name: str) -> bool | None:
+        """True/False from the runtime's loaded set, or None if it can't say.
+
+        None is a real answer, not an error: it routes `_was_cold` to the
+        load-duration fallback rather than silently guessing "warm".
+        """
+        try:
+            return any(m.name == name for m in await self.runtime.loaded())
+        except Exception:
+            return None
 
     async def generate(self, req: GenRequest, prov: Provenance | None = None) -> GenResult:
         result: GenResult | None = None
@@ -213,6 +235,18 @@ class MeasuredSession:
     @property
     def last_request_id(self) -> str | None:
         return getattr(self, "_last_id", None)
+
+
+def _was_cold(pre_resident: bool | None, server: ServerTiming | None) -> bool:
+    """Whether this request paid to load weights from disk.
+
+    Residency observed just before the request is authoritative. Only when that
+    is unavailable do we fall back to the load duration, and then with a
+    threshold high enough to clear Ollama's constant handle-setup cost.
+    """
+    if pre_resident is not None:
+        return not pre_resident
+    return bool(server and server.load_ms > COLD_LOAD_MS_FALLBACK)
 
 
 def _think_label(think: bool | str | None) -> str:

@@ -78,6 +78,56 @@ export interface ChatStats {
   load_ms: number | null;
 }
 
+export interface Spread {
+  n: number; mean: number; p50: number; p95: number; min: number; max: number;
+}
+
+/** One measured request, as the charts consume it. */
+export interface Point {
+  id: string; ts: number; model: string; kind: string;
+  think: string; cold: number;
+  decode_tps: number | null; prefill_tps: number | null;
+  ttft_ms: number | null; ttfat_ms: number | null; total_ms: number | null;
+  prompt_tokens: number | null; output_tokens: number | null;
+  thinking_tokens: number | null; answer_tokens: number | null;
+  peak_rss_bytes: number | null; srv_load_ms: number | null;
+  itl_stddev_ms: number | null;
+}
+
+export interface ModelSummary {
+  model: string; n: number;
+  decode_tps: Spread | null; prefill_tps: Spread | null;
+  ttfat_ms: Spread | null; ttft_ms: Spread | null; total_ms: Spread | null;
+  peak_rss_bytes: Spread | null;
+  cold: { n: number; load_ms: Spread | null };
+  warm: { n: number; load_ms: Spread | null };
+  thinking: { thinking_tokens: number; answer_tokens: number; ratio: number | null };
+  first_ts: number | null; last_ts: number | null;
+}
+
+export interface StatsSummary {
+  models: ModelSummary[];
+  excluded: Record<string, number>;
+  totals: { requests: number; included: number; failed: number };
+}
+
+export interface SessionRow {
+  id: string; ts: number; title: string; model: string; messages: number;
+}
+
+export interface SessionMessage {
+  id: string; session_id: string; ts: number; idx: number;
+  role: "user" | "assistant";
+  content: string | null; thinking: string | null;
+  request_id: string | null; error: string | null;
+  ttft_ms: number | null; ttfat_ms: number | null; total_ms: number | null;
+  decode_tps: number | null; prefill_tps: number | null;
+  prompt_tokens: number | null; output_tokens: number | null;
+  thinking_tokens: number | null; answer_tokens: number | null;
+  itl_stddev_ms: number | null; srv_load_ms: number | null;
+  cold: number | null; model: string | null; think: string | null;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, init);
   if (!r.ok) {
@@ -95,7 +145,23 @@ export const api = {
   warm: (n: string) => json<{ load_ms: number }>(`/models/${n}/warm`, { method: "POST" }),
   unload: (n: string) => json<{ ok: boolean }>(`/models/${n}/unload`, { method: "POST" }),
   remove: (n: string) => json<{ freed_bytes: number }>(`/models/${n}`, { method: "DELETE" }),
-  sessions: () => json<{ id: string; title: string; model: string; messages: number }[]>("/sessions"),
+  sessions: () => json<SessionRow[]>("/sessions"),
+  session: (id: string) => json<{ id: string; messages: SessionMessage[] }>(`/sessions/${id}`),
+  renameSession: (id: string, title: string) =>
+    json<{ title: string }>(`/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+  deleteSession: (id: string) =>
+    json<{ measurements_kept: number }>(`/sessions/${id}`, { method: "DELETE" }),
+  statsSummary: () => json<StatsSummary>("/stats/summary"),
+  timeline: (limit = 1000) =>
+    json<{ points: Point[]; models: string[] }>(`/stats/timeline?limit=${limit}`),
+  modelHistory: (n: string, limit = 100) =>
+    json<{ model: string; points: Point[]; summary: ModelSummary }>(
+      `/models/${n}/history?limit=${limit}`,
+    ),
   request: (id: string) => json<Record<string, unknown>>(`/requests/${id}`),
 };
 

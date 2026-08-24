@@ -95,6 +95,7 @@ silently mis-attribute the cost.
 Phase 1 is done: the measurement spine, chat, and model management.
 
 - [x] **Phase 1** — Ollama adapter, telemetry sampler, SQLite substrate, streaming chat with per-message stats, model management (pull / load / unload / delete from the app)
+- [x] **Phase 2a** — conversation history, per-model history, and charts
 - [ ] **Phase 2** — suites, graders, the matrix runner, bootstrap confidence intervals, report export
 - [ ] **Phase 3** — systems probes: context scaling, cold/warm, sustained thermal drift, memory envelope
 - [ ] **Phase 4** — reasoning economics and the quantization ladder
@@ -121,6 +122,43 @@ conditional on:
   power         ✓ AC · 52%
   env hash      3226520eea439833
 ```
+
+## History and charts
+
+Conversations persist. The sidebar lists them grouped by day; reopening one
+restores its messages **with the measurements they were recorded with**, because
+`chat_messages` joins back to the `requests` row that produced it. Deleting a
+conversation removes the scrollback and **keeps the measurements** — they are
+the benchmark record, not chat history.
+
+The **Stats** tab charts everything measured so far: throughput over time,
+speed vs memory, time-to-first-answer spread, cold-start penalty, and the
+thinking/answering split. Every model keeps one colour across every chart.
+
+Two rules the charts follow. `ok = 1 AND excluded = 0` lives in the SQL rather
+than in any component, so a chart cannot forget to drop a swapped run. And the
+exclusion ledger is shown, not hidden — "10 of 43 measurements excluded, 3
+because the machine was swapping" is a fact about the machine, and burying it
+would be the exact dishonesty this project exists to avoid.
+
+### A bug this found
+
+The cold-start flag was wrong for every row. Ollama reports a `load_duration`
+of 137–305 ms **even when the weights are already resident** — that is handle
+setup, not loading — while genuine cold loads here run 1.5–12 s. The original
+`load_ms > 100` test therefore marked all 23 early requests cold, which would
+have quietly voided the entire cold-start analysis.
+
+Residency from `/api/ps`, checked before the clock starts, is now authoritative;
+the load-duration test survives only as a fallback with a threshold sitting in
+the wide empty gap between the two clusters. `localslm repair` re-scores older
+rows by the same fallback rule and shows you the diff before writing.
+
+| model | cold start | vs warm |
+|---|---:|---:|
+| llama3.2:3b | 1.28 s | 8.0× |
+| gemma3:4b | 3.72 s | 10.9× |
+| qwen3.5:4b | 3.60 s | 14.0× |
 
 ## Managing models
 

@@ -14,8 +14,9 @@ from rich.console import Console
 from rich.table import Table
 
 from localslm.config import load_config
-from localslm.db import connect, query
+from localslm.db import connect, query, write
 from localslm.host import disk_free_bytes, host_info, power_state
+from localslm.runtimes.base import COLD_LOAD_MS_FALLBACK
 from localslm.runtimes.ollama import OllamaRuntime
 from localslm.telemetry.sampler import SystemSampler
 
@@ -132,6 +133,67 @@ def models() -> None:
         await rt.aclose()
 
     asyncio.run(main())
+
+
+@app.command()
+def repair(
+    apply: bool = typer.Option(
+        False, "--apply", help="Write the changes (default: dry run)"
+    ),
+) -> None:
+    """Recompute the cold flag on rows recorded before residency checking.
+
+    Early rows used a 100 ms load-duration threshold. Ollama reports ~150-300 ms
+    of handle setup even when weights are resident, so those rows are all
+    flagged cold. This re-derives the flag with the documented fallback rule
+    (`load_ms > COLD_LOAD_MS_FALLBACK`), which is what we use today whenever
+    residency is unknown — so history ends up scored by the same rule as new data.
+    """
+    conn = connect()
+    rows = query(
+        conn,
+        "SELECT id, model, srv_load_ms, cold FROM requests "
+        "WHERE srv_load_ms IS NOT NULL ORDER BY ts",
+    )
+    changes = [
+        (
+            r["id"],
+            r["model"],
+            r["srv_load_ms"],
+            r["cold"],
+            int(r["srv_load_ms"] > COLD_LOAD_MS_FALLBACK),
+        )
+        for r in rows
+        if r["cold"] != int(r["srv_load_ms"] > COLD_LOAD_MS_FALLBACK)
+    ]
+
+    if not changes:
+        console.print("\n  [green]Nothing to repair.[/green]\n")
+        return
+
+    t = Table(
+        title=f"{len(changes)} rows disagree with the current rule", title_justify="left"
+    )
+    t.add_column("model")
+    t.add_column("load", justify="right")
+    t.add_column("cold", justify="center")
+    for _id, model, load, old, new in changes[:25]:
+        t.add_row(model, f"{load:.0f} ms", f"{old} → [bold]{new}[/bold]")
+    console.print()
+    console.print(t)
+    if len(changes) > 25:
+        console.print(f"  [dim]…and {len(changes) - 25} more[/dim]")
+
+    if not apply:
+        console.print("\n  [yellow]Dry run.[/yellow] Re-run with --apply to write.\n")
+        return
+
+    with write(conn):
+        conn.executemany(
+            "UPDATE requests SET cold = ? WHERE id = ?",
+            [(new, _id) for _id, _, _, _, new in changes],
+        )
+    console.print(f"\n  [green]Updated {len(changes)} rows.[/green]\n")
 
 
 @app.command()

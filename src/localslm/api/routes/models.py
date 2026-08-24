@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from localslm.api.deps import get_state
+from localslm.api.routes.stats import model_rows, summarise
 from localslm.api.sse import event, sse
 from localslm.db import query
 from localslm.host import disk_free_bytes
@@ -175,6 +176,18 @@ def humanise_pull_error(message: str) -> str:
     if "no space" in low:
         return "Ran out of disk while writing the model."
     return message
+
+
+@router.get("/{name:path}/history")
+async def model_history(name: str, limit: int = 100) -> dict:
+    """This model's measured requests over time, plus its rollup."""
+    st = get_state()
+    rows = model_rows(st.conn, name, limit)
+    return {
+        "model": name,
+        "points": [dict(r) for r in reversed(rows)],
+        "summary": summarise(rows),
+    }
 
 
 @router.post("/pull")

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from localslm.api.deps import get_state
 from localslm.api.sse import event, sse
 from localslm.db import insert, new_id, query
+from localslm.db import write as db_write
 from localslm.inference.lock import LeaseBusy
 from localslm.inference.session import MeasuredSession, Provenance
 from localslm.runtimes.base import DecodeOptions, GenRequest, Message, ModelRef
@@ -100,7 +101,21 @@ async def chat(body: ChatRequest) -> object:
         },
     )
 
-    info = await st.runtime.show(body.model)
+    # The model can vanish between the UI listing it and the message being
+    # sent — deleting weights is one click away, and past measurements keep
+    # the name visible in Stats long after. Fail clearly rather than 500.
+    try:
+        info = await st.runtime.show(body.model)
+    except Exception as exc:
+        await st.lease.release_shared()
+        raise HTTPException(
+            404,
+            {
+                "error": "model_missing",
+                "model": body.model,
+                "message": f"{body.model} isn't installed any more. Pull it again from Models.",
+            },
+        ) from exc
     req = GenRequest(
         model=ModelRef(
             runtime="ollama",
@@ -216,13 +231,57 @@ async def session_detail(session_id: str) -> dict:
     st = get_state()
     msgs = query(
         st.conn,
-        "SELECT m.*, r.ttft_ms, r.ttfat_ms, r.total_ms, r.decode_tps, r.output_tokens, "
-        "r.thinking_tokens, r.answer_tokens, r.cold, r.model "
+        # Every column the StatStrip renders, so a restored conversation shows
+        # the numbers it was measured with rather than a degraded summary.
+        "SELECT m.*, r.ttft_ms, r.ttfat_ms, r.total_ms, r.decode_tps, r.prefill_tps, "
+        "r.prompt_tokens, r.output_tokens, r.thinking_tokens, r.answer_tokens, "
+        "r.itl_stddev_ms, r.srv_load_ms, r.cold, r.model, r.think "
         "FROM chat_messages m LEFT JOIN requests r ON r.id = m.request_id "
         "WHERE m.session_id = ? ORDER BY m.idx",
         (session_id,),
     )
     return {"id": session_id, "messages": [dict(r) for r in msgs]}
+
+
+class SessionPatch(BaseModel):
+    title: str
+
+
+@router.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, body: SessionPatch) -> dict:
+    st = get_state()
+    title = body.title.strip()[:120]
+    if not title:
+        raise HTTPException(422, "title cannot be empty")
+    with db_write(st.conn):
+        cur = st.conn.execute(
+            "UPDATE chat_sessions SET title = ?, updated_ts = ? WHERE id = ?",
+            (title, time.time(), session_id),
+        )
+    if not cur.rowcount:
+        raise HTTPException(404, "no such session")
+    return {"id": session_id, "title": title}
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict:
+    """Delete a conversation, keeping its measurements.
+
+    `chat_messages` is scrollback and goes. The `requests` rows are the
+    benchmark record — they outlive the conversation that produced them, so
+    deleting a chat never silently shrinks the dataset the charts read.
+    """
+    st = get_state()
+    rows = query(
+        st.conn, "SELECT COUNT(*) n FROM requests WHERE session_id = ?", (session_id,)
+    )
+    kept = rows[0]["n"]
+    with db_write(st.conn):
+        st.conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+        cur = st.conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+    if not cur.rowcount:
+        raise HTTPException(404, "no such session")
+    return {"deleted": session_id, "measurements_kept": kept}
 
 
 @router.get("/requests/{request_id}")
