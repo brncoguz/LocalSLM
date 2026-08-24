@@ -227,3 +227,48 @@ async def test_absent_model_is_recorded_cold(conn, model_ref):
     result = await session.generate(request(model_ref), Provenance(kind="chat"))
     assert result.cold is True
     assert query(conn, "SELECT cold FROM requests")[0]["cold"] == 1
+
+
+class TestCrossProcessLease:
+    """`make bench` in a terminal and the API server are separate processes.
+    An in-process lock alone lets both believe they have exclusive access."""
+
+    @pytest.mark.asyncio
+    async def test_exclusive_lease_blocks_another_process(self, tmp_path, monkeypatch):
+        import localslm.inference.lock as lockmod
+        from localslm.inference.lock import InferenceLease, LeaseBusy
+
+        monkeypatch.setattr(lockmod, "LOCK_FILE", tmp_path / "engine.lock")
+
+        first = InferenceLease()
+        await first.acquire_exclusive("bench", run_id="r1")
+
+        # A distinct lease object stands in for a second process.
+        second = InferenceLease()
+        with pytest.raises(LeaseBusy) as caught:
+            await second.acquire_exclusive("other", timeout_s=0.2)
+        assert caught.value.run_id == "r1"
+
+        await first.release_exclusive()
+        await second.acquire_exclusive("other", timeout_s=1)
+        await second.release_exclusive()
+
+    @pytest.mark.asyncio
+    async def test_chat_is_refused_while_another_process_benchmarks(
+        self, tmp_path, monkeypatch
+    ):
+        import localslm.inference.lock as lockmod
+        from localslm.inference.lock import InferenceLease, LeaseBusy
+
+        monkeypatch.setattr(lockmod, "LOCK_FILE", tmp_path / "engine.lock")
+
+        bench = InferenceLease()
+        await bench.acquire_exclusive("bench", run_id="r9")
+
+        api = InferenceLease()
+        with pytest.raises(LeaseBusy):
+            await api.acquire_shared()
+
+        await bench.release_exclusive()
+        await api.acquire_shared()  # allowed once the benchmark finishes
+        await api.release_shared()

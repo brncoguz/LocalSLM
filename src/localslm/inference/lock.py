@@ -12,8 +12,19 @@ with the run id, not a quietly corrupted measurement.
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import json
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
+
+from localslm.config import path as repo_path
+
+# Cross-process guard. The in-process lock alone is not enough: `make bench` in
+# a terminal and the API server are separate processes, and each would happily
+# believe it had exclusive access while both drove the same GPU.
+LOCK_FILE = repo_path("data", "engine.lock")
 
 
 class LeaseBusy(RuntimeError):
@@ -45,6 +56,68 @@ class InferenceLease:
         self._since: float | None = None
         self._shared = 0
         self._eta_s: float | None = None
+        self._fd: int | None = None
+
+    # -- cross-process ----------------------------------------------------
+
+    def _take_file_lock(self, holder: str, run_id: str | None) -> bool:
+        """Try to claim the on-disk lock. False if another process holds it."""
+        path = Path(LOCK_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        os.ftruncate(fd, 0)
+        os.write(
+            fd,
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "holder": holder,
+                    "run_id": run_id,
+                    "since": time.time(),
+                }
+            ).encode(),
+        )
+        os.fsync(fd)
+        self._fd = fd
+        return True
+
+    def _release_file_lock(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            self._fd = None
+
+    @staticmethod
+    def foreign_holder() -> dict | None:
+        """Who holds the lock in another process, if anyone.
+
+        The lock is advisory and released automatically when the holding
+        process exits, so a crashed benchmark cannot wedge the engine.
+        """
+        path = Path(LOCK_FILE)
+        if not path.exists():
+            return None
+        fd = os.open(path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                return json.loads(path.read_text() or "{}") or None
+            except (OSError, ValueError):
+                return {"holder": "unknown"}
+            finally:
+                os.close(fd)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        return None
 
     def status(self) -> LeaseStatus:
         return LeaseStatus(
@@ -64,6 +137,12 @@ class InferenceLease:
         async with self._cond:
             if self._exclusive_holder is not None:
                 raise LeaseBusy(self._exclusive_holder, self._run_id, self._eta_s)
+            if foreign := self.foreign_holder():
+                raise LeaseBusy(
+                    foreign.get("holder", "another process"),
+                    foreign.get("run_id"),
+                    self._eta_s,
+                )
             self._shared += 1
 
     async def release_shared(self) -> None:
@@ -88,12 +167,20 @@ class InferenceLease:
                     raise LeaseBusy(
                         self._exclusive_holder or "chat", self._run_id, self._eta_s
                     ) from None
+            if not self._take_file_lock(holder, run_id):
+                foreign = self.foreign_holder() or {}
+                raise LeaseBusy(
+                    foreign.get("holder", "another process"),
+                    foreign.get("run_id"),
+                    self._eta_s,
+                )
             self._exclusive_holder = holder
             self._run_id = run_id
             self._since = time.time()
 
     async def release_exclusive(self) -> None:
         async with self._cond:
+            self._release_file_lock()
             self._exclusive_holder = None
             self._run_id = None
             self._since = None

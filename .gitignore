@@ -13,3 +13,4 @@ runs/*.html
 ui/node_modules/
 ui/dist/
 .DS_Store
+data/engine.lock

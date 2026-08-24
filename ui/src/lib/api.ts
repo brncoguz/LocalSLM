@@ -128,6 +128,42 @@ export interface SessionMessage {
   cold: number | null; model: string | null; think: string | null;
 }
 
+export interface SuiteInfo {
+  name: string; items: number; verified: number; tasks: string[];
+  hash: string; categories: string[]; unanswerable: number;
+}
+
+export interface CellResult {
+  cell_key: string; label: string; model: string;
+  axes: Record<string, unknown>;
+  n: number; score: number; ci_lo: number; ci_hi: number; pass_rate: number;
+  tasks: Record<string, Record<string, number>>;
+  tied_with_previous?: boolean;
+}
+
+export interface RunRow {
+  id: string; ts: number; finished_ts: number | null;
+  suite: string; suite_hash: string; preset: string; label: string;
+  status: "running" | "done" | "aborted" | "failed";
+  planned_units: number; done_units: number;
+  models: string[]; elapsed_s: number | null;
+  best_score: number | null; n_cells: number;
+}
+
+export interface RunDetail extends Omit<RunRow, "best_score" | "n_cells"> {
+  cells: CellResult[];
+  plan: Record<string, unknown>;
+  abort_reason: string | null;
+  run_seed: number;
+  env_hash: string;
+}
+
+export interface ResultRow {
+  id: string; item_id: string; task: string; model: string; cell_key: string;
+  score: number; passed: number; pred_label: string | null;
+  gold_label: string | null; detail_json: string; request_id: string;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, init);
   if (!r.ok) {
@@ -158,12 +194,94 @@ export const api = {
   statsSummary: () => json<StatsSummary>("/stats/summary"),
   timeline: (limit = 1000) =>
     json<{ points: Point[]; models: string[] }>(`/stats/timeline?limit=${limit}`),
+  suites: () => json<SuiteInfo[]>("/suites"),
+  runs: (limit = 50) => json<RunRow[]>(`/runs?limit=${limit}`),
+  run: (id: string) => json<RunDetail>(`/runs/${id}`),
+  runResults: (id: string, failedOnly = false) =>
+    json<ResultRow[]>(`/runs/${id}/results?failed_only=${failedOnly}`),
+  startRun: (body: {
+    models: string[]; suites: string[]; repeats: number;
+    think_levels: string[]; label: string;
+  }) =>
+    json<{ run_id: string; total_requests: number; cells: number }>("/bench/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  abortRun: (id: string) =>
+    json<{ aborting: string }>(`/bench/runs/${id}/abort`, { method: "POST" }),
+  activeRun: () => json<{ run_id: string } | null>("/bench/active"),
   modelHistory: (n: string, limit = 100) =>
     json<{ model: string; points: Point[]; summary: ModelSummary }>(
       `/models/${n}/history?limit=${limit}`,
     ),
   request: (id: string) => json<Record<string, unknown>>(`/requests/${id}`),
 };
+
+
+export type SSEHandler = (event: string, data: any) => void;
+
+/** Parse an SSE body, dispatching each frame.
+ *  Shared by the POST and GET helpers so the framing is parsed one way only. */
+async function readSSE(res: Response, onEvent: SSEHandler): Promise<void> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop() ?? "";
+    for (const frame of frames) {
+      let name = "message";
+      const dataLines: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event: ")) name = line.slice(7).trim();
+        else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+      }
+      if (dataLines.length) {
+        try { onEvent(name, JSON.parse(dataLines.join("\n"))); } catch { /* keep streaming */ }
+      }
+    }
+  }
+}
+
+async function failure(res: Response): Promise<Error> {
+  let detail: any;
+  try { detail = (await res.json()).detail; } catch { detail = null; }
+  return Object.assign(new Error(`${res.status}`), { status: res.status, detail });
+}
+
+/** POST that returns an SSE stream. EventSource cannot POST, so the framing is
+ *  parsed here — which is needed anyway to stamp arrival times. */
+export async function streamPost(
+  path: string,
+  body: unknown,
+  onEvent: SSEHandler,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) throw await failure(res);
+  await readSSE(res, onEvent);
+}
+
+/** GET that returns an SSE stream. Used for attaching to a run already in
+ *  progress, which is a read rather than an action. */
+export async function streamGet(
+  path: string,
+  onEvent: SSEHandler,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api${path}`, { signal });
+  if (!res.ok) throw await failure(res);
+  await readSSE(res, onEvent);
+}
 
 /** Pull a model, reporting aggregate progress. Resolves when the pull finishes
  *  or rejects with the server's reason (disk guard, benchmark running, 404). */
@@ -189,48 +307,4 @@ export function pullModel(
       (e) => reject(e),
     );
   });
-}
-
-export type SSEHandler = (event: string, data: any) => void;
-
-/** POST that returns an SSE stream. EventSource can't POST, so we parse the
- *  framing ourselves — which we'd need anyway to stamp arrival times. */
-export async function streamPost(
-  path: string,
-  body: unknown,
-  onEvent: SSEHandler,
-  signal?: AbortSignal,
-): Promise<void> {
-  const res = await fetch(`/api${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!res.ok) {
-    let detail: any;
-    try { detail = (await res.json()).detail; } catch { detail = null; }
-    throw Object.assign(new Error(`${res.status}`), { status: res.status, detail });
-  }
-  const reader = res.body!.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const frames = buf.split("\n\n");
-    buf = frames.pop() ?? "";
-    for (const frame of frames) {
-      let name = "message";
-      const dataLines: string[] = [];
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event: ")) name = line.slice(7).trim();
-        else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
-      }
-      if (dataLines.length) {
-        try { onEvent(name, JSON.parse(dataLines.join("\n"))); } catch { /* keep streaming */ }
-      }
-    }
-  }
 }
