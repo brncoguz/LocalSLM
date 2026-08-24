@@ -53,6 +53,15 @@ export interface ModelDetail {
   recent: Record<string, unknown>[];
 }
 
+export interface PullProgress {
+  status: string;
+  completed: number;
+  total: number;
+  pct: number | null;
+  bytes_per_s: number | null;
+  eta_s: number | null;
+}
+
 export interface ChatStats {
   ttft_ms: number | null;
   ttfat_ms: number | null;
@@ -89,6 +98,32 @@ export const api = {
   sessions: () => json<{ id: string; title: string; model: string; messages: number }[]>("/sessions"),
   request: (id: string) => json<Record<string, unknown>>(`/requests/${id}`),
 };
+
+/** Pull a model, reporting aggregate progress. Resolves when the pull finishes
+ *  or rejects with the server's reason (disk guard, benchmark running, 404). */
+export function pullModel(
+  name: string,
+  onProgress: (p: PullProgress) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    streamPost(
+      "/models/pull",
+      { name },
+      (ev, data) => {
+        if (ev === "progress") onProgress(data as PullProgress);
+        else if (ev === "done") resolve();
+        // The stream carries its own errors: a mid-pull disk-guard abort is a
+        // 200 response that fails, so it can't be surfaced by status code.
+        else if (ev === "error") reject(new Error(data.message ?? "pull failed"));
+      },
+      signal,
+    ).then(
+      () => resolve(),
+      (e) => reject(e),
+    );
+  });
+}
 
 export type SSEHandler = (event: string, data: any) => void;
 

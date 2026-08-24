@@ -60,15 +60,23 @@ Measured on this machine, `n = 2` after discarding a warmup, single prompt.
 anything with confidence. The suite runner that produces real confidence
 intervals is phase 2.
 
-| model | think | TTFAT | output tokens | tok/s | peak RSS |
-|---|---|---:|---:|---:|---:|
-| qwen3.5:4b | off | 1.43 s | 4 | 46.7 | 4.4 GB |
-| qwen3.5:4b | high | 39.25 s | 1,376 | 35.3 | 4.4 GB |
-| qwen3.5:9b | off | 2.62 s | 4 | 27.5 | 6.4 GB |
-| deepseek-r1:8b | off | 73.82 s | 1,672 | 23.0 | 6.1 GB |
-| deepseek-r1:8b | high | 72.78 s | 1,672 | 23.0 | 5.8 GB |
+*"A shop sells pens at 3 for $2. How much do 21 pens cost?"* — correct answer `$14`.
 
-Two things already stand out, both worth confirming with a real suite:
+| model | think | TTFAT | output tokens | tok/s | peak RSS | answer |
+|---|---|---:|---:|---:|---:|:--|
+| llama3.2:3b | n/a | 0.20 s | 3 | 79.3 | — | `$15` ✗ |
+| qwen3.5:4b | off | 1.43 s | 4 | 46.7 | 4.4 GB | `$14` ✓ |
+| qwen3.5:4b | high | 39.25 s | 1,376 | 35.3 | 4.4 GB | `$14` ✓ |
+| qwen3.5:9b | off | 2.62 s | 4 | 27.5 | 6.4 GB | `$14` ✓ |
+| deepseek-r1:8b | off | 73.82 s | 1,672 | 23.0 | 6.1 GB | `$14` ✓ |
+| deepseek-r1:8b | high | 72.78 s | 1,672 | 23.0 | 5.8 GB | `$14` ✓ |
+
+Three things already stand out, all worth confirming with a real suite:
+
+**The fastest model is the wrong one.** `llama3.2:3b` answers in 200 ms at 79 tok/s
+— roughly 200× faster than `deepseek-r1:8b` — and gets it wrong. Any speed
+comparison that doesn't carry a correctness column beside it is worse than
+useless, which is why the leaderboard is a Pareto frontier and not a ranking.
 
 **Reasoning cost 27× the latency for an identical answer.** `qwen3.5:4b` answers
 the arithmetic question in 1.4 s with thinking off and 39 s with it on. Both say
@@ -86,7 +94,7 @@ silently mis-attribute the cost.
 
 Phase 1 is done: the measurement spine, chat, and model management.
 
-- [x] **Phase 1** — Ollama adapter, telemetry sampler, SQLite substrate, streaming chat with per-message stats, model management
+- [x] **Phase 1** — Ollama adapter, telemetry sampler, SQLite substrate, streaming chat with per-message stats, model management (pull / load / unload / delete from the app)
 - [ ] **Phase 2** — suites, graders, the matrix runner, bootstrap confidence intervals, report export
 - [ ] **Phase 3** — systems probes: context scaling, cold/warm, sustained thermal drift, memory envelope
 - [ ] **Phase 4** — reasoning economics and the quantization ladder
@@ -113,6 +121,26 @@ conditional on:
   power         ✓ AC · 52%
   env hash      3226520eea439833
 ```
+
+## Managing models
+
+Pull, load, unload and delete without leaving the app. The **Models** screen has a
+curated catalog — each entry says what contrast it buys, not just how big it is —
+plus a free-text box for anything else on the Ollama registry.
+
+Pulls stream aggregate progress with live throughput and ETA. Ollama reports
+progress one layer at a time, so a naive passthrough makes the bar restart on
+every layer; the API sums across layers and streams the total instead.
+
+Two guards sit on the endpoint rather than the UI, because the UI is not the only
+caller:
+
+- **Disk guard** — refuses a pull that would leave under 10 GB free. Catalogued
+  models are checked before starting; anything else is checked as it downloads,
+  since Ollama only reveals the size along the way.
+- **Benchmark guard** — refuses while a run holds the exclusive lease. A pull
+  saturates disk and CPU, and would inflate every latency in the run without
+  leaving a trace in the data.
 
 ## Architecture
 

@@ -152,6 +152,31 @@ class PullRequest(BaseModel):
     name: str
 
 
+def aggregate_layers(layers: dict[str, tuple[int, int]]) -> tuple[int, int]:
+    """Sum per-layer byte counts into overall (completed, total).
+
+    Ollama reports progress one layer at a time. Passing that through directly
+    makes the bar restart on every layer, so we keep the whole map and stream
+    the sum — which is the number a human is actually asking for.
+    """
+    return (
+        sum(c for c, _ in layers.values()),
+        sum(t for _, t in layers.values()),
+    )
+
+
+def humanise_pull_error(message: str) -> str:
+    """Ollama's registry errors are written for its own CLI."""
+    low = message.lower()
+    if "file does not exist" in low or "manifest" in low:
+        return "No such model on the Ollama registry — check the name and tag."
+    if "connection" in low or "dial tcp" in low or "no such host" in low:
+        return "Couldn't reach the Ollama registry. Check your network."
+    if "no space" in low:
+        return "Ran out of disk while writing the model."
+    return message
+
+
 @router.post("/pull")
 async def pull(body: PullRequest) -> object:
     """Pull a model, streaming aggregate progress.
@@ -198,7 +223,7 @@ async def pull(body: PullRequest) -> object:
         try:
             async for progress in st.runtime.pull(name):
                 if err := progress.get("error"):
-                    yield event("error", {"message": err})
+                    yield event("error", {"message": humanise_pull_error(str(err))})
                     return
 
                 digest = progress.get("digest")
@@ -207,8 +232,7 @@ async def pull(body: PullRequest) -> object:
                         progress.get("completed") or 0,
                         progress["total"],
                     )
-                done_bytes = sum(c for c, _ in layers.values())
-                total_bytes = sum(t for _, t in layers.values())
+                done_bytes, total_bytes = aggregate_layers(layers)
 
                 # Refuse to fill the disk. Checked as we go because an
                 # uncatalogued model's size isn't knowable up front.
@@ -253,7 +277,7 @@ async def pull(body: PullRequest) -> object:
                 "done", {"name": name, "elapsed_s": round(time.monotonic() - started, 1)}
             )
         except Exception as exc:
-            yield event("error", {"message": str(exc)})
+            yield event("error", {"message": humanise_pull_error(str(exc))})
 
     return sse(gen())
 
