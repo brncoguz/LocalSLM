@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from localslm import __version__
 from localslm.api.deps import init_state, shutdown_state
-from localslm.api.routes import chat, health, models, stats
+from localslm.api.routes import bench, chat, health, models, stats
 
 
 @asynccontextmanager
@@ -27,5 +27,5 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for module in (health, models, chat, stats):
+for module in (health, models, chat, stats, bench):
     app.include_router(module.router, prefix="/api")

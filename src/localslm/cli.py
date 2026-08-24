@@ -197,14 +197,154 @@ def repair(
 
 
 @app.command()
-def bench(preset: str = typer.Option("quick", help="Preset from config/app.yaml")) -> None:
-    """Run a benchmark preset headlessly. (Suite runner lands in phase 2.)"""
-    cfg = load_config().with_preset(preset)
-    console.print(f"\n  preset [bold]{preset}[/bold] · config {cfg.fingerprint()}")
-    console.print("  [yellow]The suite runner is phase 2 — not wired up yet.[/yellow]")
-    console.print(
-        "  [dim]Phase 1 ships the measurement spine: chat, models, telemetry.[/dim]\n"
-    )
+def suites() -> None:
+    """List available test suites."""
+    from localslm.bench.suites import available, load
+
+    t = Table(title="Test suites", title_justify="left")
+    t.add_column("suite")
+    t.add_column("items", justify="right")
+    t.add_column("verified", justify="right")
+    t.add_column("grader")
+    t.add_column("hash")
+    for name in available():
+        s = load(name)
+        t.add_row(
+            name,
+            str(len(s)),
+            f"{s.verified}" if s.verified == len(s) else f"[yellow]{s.verified}[/yellow]",
+            ", ".join(sorted(s.tasks)),
+            s.content_hash(),
+        )
+    console.print()
+    console.print(t)
+    console.print()
+
+
+@app.command()
+def bench(
+    models: str = typer.Option(
+        "", help="Comma-separated; defaults to every installed model"
+    ),
+    suite: str = typer.Option("", help="Comma-separated; defaults to all suites"),
+    repeats: int = typer.Option(1, help="Measured passes per item"),
+    think: str = typer.Option("false", help="Comma-separated: false,low,medium,high"),
+    label: str = typer.Option("cli", help="Label recorded on the run"),
+) -> None:
+    """Run a benchmark and print per-cell scores with confidence intervals."""
+    import asyncio
+
+    from localslm.api.deps import init_state, shutdown_state
+    from localslm.bench.runner import BenchRunner
+    from localslm.bench.spec import BenchSpec
+    from localslm.bench.suites import available, load
+    from localslm.db import new_id
+
+    async def main() -> None:
+        st = init_state()
+        try:
+            installed = await st.runtime.list_models()
+            chosen = [m.strip() for m in models.split(",") if m.strip()] or [
+                m.ref.name for m in installed
+            ]
+            names = {m.ref.name for m in installed}
+            missing = [m for m in chosen if m not in names]
+            if missing:
+                console.print(f"  [red]not installed:[/red] {', '.join(missing)}")
+                return
+
+            capable = {}
+            for name in chosen:
+                info = await st.runtime.show(name)
+                capable[name] = info.capabilities.thinking
+
+            suite_names = [x.strip() for x in suite.split(",") if x.strip()] or available()
+            levels: list[bool | str] = []
+            for raw in think.split(","):
+                raw = raw.strip().lower()
+                levels.append(False if raw in ("false", "off", "") else raw)
+
+            spec = BenchSpec(
+                models=chosen,
+                suites=[load(n) for n in suite_names],
+                think_levels=levels,
+                repeats=repeats,
+                warmups=1,
+                thinking_capable=capable,
+            )
+            total = spec.total_requests()
+            console.print(
+                f"\n  {len(spec.cells())} cells x {sum(len(s) for s in spec.suites)} items "
+                f"x {repeats} reps = [bold]{total}[/bold] requests"
+            )
+
+            run_id = new_id()
+            await st.lease.acquire_exclusive("bench", run_id)
+            cells: list = []
+            try:
+                runner = BenchRunner(st, spec, run_id, label)
+                with console.status("running...") as status:
+                    async for ev in runner.run():
+                        if ev.kind == "unit":
+                            d = ev.data
+                            status.update(
+                                f"[{d['done']}/{d['total']}] {d['cell']} - "
+                                f"{d['suite']}/{d['item']} {'ok' if d['passed'] else 'FAIL'}"
+                            )
+                        elif ev.kind == "warning":
+                            console.print(f"  [yellow]{ev.data['message']}[/yellow]")
+                        elif ev.kind == "aborted":
+                            console.print(f"  [red]aborted: {ev.data['reason']}[/red]")
+                        elif ev.kind == "done":
+                            cells = ev.data["cells"]
+                            console.print(
+                                f"  finished in {ev.data['elapsed_s']}s - run {run_id}"
+                            )
+            finally:
+                await st.lease.release_exclusive()
+
+            if cells:
+                _print_cells(cells)
+        finally:
+            await shutdown_state()
+
+    asyncio.run(main())
+
+
+def _print_cells(cells: list) -> None:
+    """Score per cell, with the interval beside it.
+
+    The interval is not decoration: at these sample sizes most apparent gaps
+    are noise, and printing a bare mean invites reading a ranking into it.
+    """
+    tasks = sorted({t for c in cells for t in c["tasks"]})
+    t = Table(title="Results", title_justify="left")
+    t.add_column("model")
+    t.add_column("settings")
+    t.add_column("n", justify="right")
+    t.add_column("score", justify="right")
+    t.add_column("95% CI", justify="right")
+    for task in tasks:
+        t.add_column(task, justify="right")
+
+    best = max((c["score"] for c in cells), default=0)
+    for c in sorted(cells, key=lambda x: -x["score"]):
+        axes = ", ".join(f"{k}={v}" for k, v in c["axes"].items()) or "-"
+        score = f"{c['score']:.2f}"
+        row = [
+            c["model"],
+            axes,
+            str(c["n"]),
+            f"[bold]{score}[/bold]" if c["score"] == best else score,
+            f"[dim][{c['ci_lo']:.2f}, {c['ci_hi']:.2f}][/dim]",
+        ]
+        for task in tasks:
+            m = c["tasks"].get(task)
+            row.append(f"{m['accuracy']:.2f}" if m else "[dim]-[/dim]")
+        t.add_row(*row)
+    console.print()
+    console.print(t)
+    console.print()
 
 
 if __name__ == "__main__":

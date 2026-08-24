@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, BarChart3, Boxes, MessageSquare } from "lucide-react";
+import { Activity, BarChart3, Boxes, FlaskConical, MessageSquare } from "lucide-react";
 import { api, type Health, type ModelsResponse } from "@/lib/api";
 import { MachineStrip } from "@/components/MachineStrip";
 import { Chat } from "@/pages/Chat";
 import { Models } from "@/pages/Models";
 import { Stats } from "@/pages/Stats";
+import { Bench } from "@/pages/Bench";
 import { cn } from "@/lib/utils";
 
-type Tab = "chat" | "models" | "stats";
+type Tab = "chat" | "models" | "bench" | "stats";
 
 const TABS: { id: Tab; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "models", label: "Models", icon: Boxes },
+  { id: "bench", label: "Bench", icon: FlaskConical },
   { id: "stats", label: "Stats", icon: BarChart3 },
 ];
 
@@ -69,6 +71,8 @@ export default function App() {
           <Chat models={models?.installed ?? []} onMeasured={refresh} />
         ) : tab === "models" ? (
           <Models data={models} refresh={refresh} />
+        ) : tab === "bench" ? (
+          <Bench models={(models?.installed ?? []).map((m) => m.name)} />
         ) : (
           <Stats />
         )}
