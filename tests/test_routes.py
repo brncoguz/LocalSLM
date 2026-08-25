@@ -182,3 +182,102 @@ class TestChatSessions:
 
         assert r.status_code == 200
         assert r.json()["messages"] == []
+
+
+class TestJudgeEndpoints:
+    """Starting a judging pass from the UI.
+
+    The failure modes worth covering are the ones a user meets first: a run
+    that doesn't exist, a judge model that isn't pulled, and a machine already
+    busy. Each has to say which of those happened, because the remedy differs
+    and "could not judge" sends people to the wrong place.
+    """
+
+    def seed(self, conn, run_id="r1", excluded=0):
+        insert(conn, "runs", {"id": run_id, "ts": 1.0, "suite": "math", "status": "done"})
+        insert(
+            conn,
+            "requests",
+            {
+                "id": "req0",
+                "ts": 1.0,
+                "kind": "bench",
+                "run_id": run_id,
+                "runtime": "fake",
+                "model": "m:4b",
+                "output_text": "4",
+                "excluded": excluded,
+            },
+        )
+        insert(
+            conn,
+            "results",
+            {
+                "id": "res0",
+                "run_id": run_id,
+                "request_id": "req0",
+                "model": "m:4b",
+                "item_id": "m1",
+                "task": "numeric",
+                "grader": "numeric",
+                "score": 1.0,
+                "passed": 1,
+            },
+        )
+        return run_id
+
+    def test_an_unknown_run_is_a_404(self, client):
+        assert client.post("/api/runs/nope/judge", json={"limit": 5}).status_code == 404
+
+    def test_an_uninstalled_judge_model_says_which_one(self, client, conn):
+        """The fake runtime has nothing installed, which is exactly the state a
+        fresh checkout is in. Naming the model is the difference between a
+        dead end and a one-line fix."""
+        run_id = self.seed(conn)
+
+        r = client.post(f"/api/runs/{run_id}/judge", json={"limit": 5})
+
+        assert r.status_code == 404
+        body = r.json()["detail"]
+        assert body["error"] == "judge_missing"
+        assert body["model"]
+
+    def test_a_fully_judged_run_reports_nothing_to_do(self, client, conn):
+        """Not an error: re-judging is how the command resumes, so arriving at
+        "already done" is a normal outcome and must not read as a failure."""
+        run_id = self.seed(conn)
+        insert(
+            conn,
+            "judge_verdicts",
+            {
+                "id": "v0",
+                "ts": 1.0,
+                "run_id": run_id,
+                "request_id": "req0",
+                "judge_model": "j:9b",
+                "backend": "local",
+                "parse_ok": 1,
+                "passed": 1,
+            },
+        )
+
+        r = client.post(f"/api/runs/{run_id}/judge", json={"limit": 0})
+
+        assert r.status_code == 200
+        assert r.json()["pending"] == 0
+
+    def test_streaming_a_run_that_is_not_being_judged_is_a_404(self, client, conn):
+        run_id = self.seed(conn)
+
+        assert client.get(f"/api/runs/{run_id}/judge/stream").status_code == 404
+
+    def test_agreement_is_readable_before_anything_is_judged(self, client, conn):
+        """The panel calls this on every run it renders, including ones nobody
+        has judged. It has to answer rather than 404, or the UI cannot tell an
+        unjudged run from a broken endpoint."""
+        run_id = self.seed(conn)
+
+        r = client.get(f"/api/runs/{run_id}/judge-agreement")
+
+        assert r.status_code == 200
+        assert r.json()["n"] == 0

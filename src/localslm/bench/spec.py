@@ -199,6 +199,10 @@ def summarise_plan(spec: BenchSpec, units: Sequence[Unit]) -> dict[str, Any]:
             {"key": c.key, "label": c.label(), "model": c.model} for c in spec.cells()
         ],
         "think_levels": [str(t) for t in spec.think_levels],
+        # Recorded because the plan is what a rerun is rebuilt from. Leaving it
+        # out meant a repeated run silently dropped the temperature axis and
+        # compared itself against a differently-configured original.
+        "temperatures": spec.temperatures,
         "repeats": spec.repeats,
         "warmups": spec.warmups,
         "total_units": len(units),

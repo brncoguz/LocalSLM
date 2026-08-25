@@ -169,6 +169,50 @@ export interface DeterminismCell {
   }>;
 }
 
+/** How far the judge can be trusted on one run. `kappa` is null when it is
+ *  undefined — one side rated everything the same way, so there is no
+ *  agreement beyond chance to measure. */
+export interface JudgeAgreement {
+  run_id: string;
+  n: number;
+  note?: string;
+  judge_model?: string;
+  n_verdicts?: number;
+  judge_parse_failure_rate?: number;
+  agreement_rate?: number | null;
+  kappa?: number | null;
+  judge_pass_rate?: number | null;
+  grader_pass_rate?: number | null;
+  false_pass_rate?: number | null;
+  false_fail_rate?: number | null;
+  /** Counts per 1-5 rating. A judge that only ever says 5 is not grading, and
+   *  the headline agreement rate will not reveal that. */
+  rating_histogram?: Record<string, number>;
+  confusion?: {
+    both_pass: number; judge_pass_grader_fail: number;
+    judge_fail_grader_pass: number; both_fail: number;
+  };
+  disagreements?: {
+    item_id: string; model: string; task: string;
+    grader: string; judge: string; rating: number | null; reason: string;
+  }[];
+}
+
+/** One judgement with the evidence behind it. The agreement report says how
+ *  often the judge was right; this is what lets you see whether it was right
+ *  for the right reason. */
+export interface JudgeVerdict {
+  item_id: string; task: string; model: string;
+  question: string; answer: string;
+  grader_passed: boolean | null; grader_score: number | null; gold_label: string | null;
+  judge_model: string; rating: number | null; judge_passed: boolean | null;
+  parse_ok: boolean; reason: string; raw: string;
+  judge_prompt: string; judge_ms: number | null; judge_tokens: number | null;
+  agreed: boolean | null;
+}
+
+export type VerdictFilter = "all" | "disagreements" | "parse_failures";
+
 export interface SessionRow {
   id: string; ts: number; title: string; model: string; messages: number;
 }
@@ -208,9 +252,21 @@ export interface RunRow {
   best_score: number | null; n_cells: number;
 }
 
+/** The experiment a run was, in the form a rerun can be rebuilt from.
+ *  Older runs predate `temperatures`, hence optional. */
+export interface RunPlan {
+  models: string[];
+  suites: { name: string; items: number; verified: number }[];
+  think_levels: string[];
+  temperatures?: number[];
+  repeats: number;
+  warmups: number;
+  suite_hash: string;
+}
+
 export interface RunDetail extends Omit<RunRow, "best_score" | "n_cells"> {
   cells: CellResult[];
-  plan: Record<string, unknown>;
+  plan: RunPlan;
   abort_reason: string | null;
   run_seed: number;
   env_hash: string;
@@ -283,6 +339,21 @@ export const api = {
     json<{ run_id: string; cells: DeterminismCell[]; note: string | null }>(
       `/runs/${id}/determinism`,
     ),
+  judgeAgreement: (id: string) =>
+    json<JudgeAgreement>(`/runs/${id}/judge-agreement`),
+  judgeVerdicts: (id: string, only: VerdictFilter = "all", limit = 60) =>
+    json<{ run_id: string; only: string; n: number; verdicts: JudgeVerdict[] }>(
+      `/runs/${id}/judge-verdicts?only=${only}&limit=${limit}`,
+    ),
+  startJudging: (id: string, limit: number) =>
+    json<{ run_id: string; pending: number; judge_model?: string; note?: string }>(
+      `/runs/${id}/judge`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit }),
+      },
+    ),
   runResults: (id: string, failedOnly = false) =>
     json<ResultRow[]>(`/runs/${id}/results?failed_only=${failedOnly}`),
   startRun: (body: {
@@ -319,6 +390,7 @@ function describeWrite(method: string, path: string): string {
   if (method === "DELETE" && path.startsWith("/runs")) return "Deleting a run";
   if (method === "DELETE" && path.startsWith("/sessions")) return "Deleting a conversation";
   if (path.startsWith("/bench/runs")) return "Starting a benchmark";
+  if (path.endsWith("/judge")) return "Judging a run";
   if (path.startsWith("/suites/from-session")) return "Saving a conversation as a suite";
   if (path === "/chat") return "Chatting";
   return "That action";

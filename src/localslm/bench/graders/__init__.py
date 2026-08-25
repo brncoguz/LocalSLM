@@ -16,6 +16,7 @@ from localslm.bench.graders.grounded import GroundedGrader
 from localslm.bench.graders.ifeval import IFEvalGrader
 from localslm.bench.graders.json_schema import JsonSchemaGrader
 from localslm.bench.graders.numeric import ExactGrader, NumericGrader
+from localslm.bench.graders.rubric import RubricGrader
 
 REGISTRY: dict[str, Grader] = {
     g.key: g  # type: ignore[misc]
@@ -27,6 +28,7 @@ REGISTRY: dict[str, Grader] = {
         ContainsGrader(),
         RefusalGrader(),
         GroundedGrader(),
+        RubricGrader(),
     )
 }
 

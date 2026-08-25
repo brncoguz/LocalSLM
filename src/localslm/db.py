@@ -145,6 +145,29 @@ CREATE TABLE IF NOT EXISTS cells (
 );
 CREATE INDEX IF NOT EXISTS cells_model ON cells(model);
 
+-- One judgement of one request. Kept out of `results` on purpose: `results`
+-- is the deterministic record, and a judge's opinion is a different kind of
+-- fact with a different shelf life. Separating them is also what lets the same
+-- request be judged twice — by two backends, or before and after a prompt
+-- change — without overwriting anything.
+CREATE TABLE IF NOT EXISTS judge_verdicts (
+    id TEXT PRIMARY KEY, ts REAL NOT NULL,
+    run_id TEXT,
+    request_id TEXT NOT NULL,          -- the generation being judged
+    judge_request_id TEXT,             -- the judge's own measured generation
+    item_id TEXT, task TEXT, model TEXT,
+    judge_model TEXT NOT NULL, backend TEXT NOT NULL,
+    reference_free INTEGER NOT NULL DEFAULT 1,
+    rating INTEGER, score REAL, passed INTEGER,
+    -- 0 when the judge produced nothing usable. Distinct from a low score:
+    -- one is a fact about the judge, the other about the model.
+    parse_ok INTEGER NOT NULL DEFAULT 1,
+    rationale TEXT, raw TEXT, detail_json TEXT,
+    cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_verdicts_request ON judge_verdicts(request_id);
+CREATE INDEX IF NOT EXISTS idx_verdicts_run ON judge_verdicts(run_id);
+
 CREATE TABLE IF NOT EXISTS arena_pairings (
     id TEXT PRIMARY KEY, ts REAL NOT NULL, run_id TEXT,
     prompt TEXT NOT NULL, prompt_hash TEXT, item_id TEXT, category TEXT,

@@ -184,7 +184,15 @@ def export_demo(
         # Every completed run, so the demo's run list expands like the real one.
         for run in [r for r in runs if r["status"] in ("done", "aborted")][:8]:
             rid = run["id"]
-            for suffix in ("", "/thinking", "/determinism"):
+            for suffix in (
+                "",
+                "/thinking",
+                "/determinism",
+                "/judge-agreement",
+                "/judge-verdicts?only=disagreements&limit=60",
+                "/judge-verdicts?only=all&limit=60",
+                "/judge-verdicts?only=parse_failures&limit=60",
+            ):
                 capture(f"/api/runs/{rid}{suffix}")
 
         for model in (snapshot.get("/api/models") or {}).get("installed", []):
@@ -384,6 +392,151 @@ def suites() -> None:
         )
     console.print()
     console.print(t)
+    console.print()
+
+
+@app.command()
+def judge(
+    run_id: str = typer.Argument(..., help="Run to judge, from `localslm runs`"),
+    limit: int = typer.Option(0, help="Stop after this many items (0 = all)"),
+    agreement_only: bool = typer.Option(
+        False, "--agreement-only", help="Skip judging; just report stored verdicts"
+    ),
+) -> None:
+    """Score a completed run with the judge, then report how far it can be trusted.
+
+    The judge sees the question and the answer but not the expected answer, so
+    the agreement figure describes the situation it will actually be used in.
+    Read `kappa`, not the raw agreement rate: these suites are mostly passable,
+    so a judge that approved everything would look 85-90% right.
+
+    Verdicts are stored as they arrive, so an interrupted run can be resumed by
+    re-running this command — already-judged items are skipped.
+    """
+    import asyncio
+
+    from localslm.api.deps import init_state, shutdown_state
+    from localslm.bench.agreement import agreement, judge_run
+    from localslm.bench.judge import build_judge
+    from localslm.inference.session import MeasuredSession
+
+    async def main() -> None:
+        st = init_state()
+        try:
+            if not agreement_only:
+                try:
+                    judge_model = build_judge(
+                        MeasuredSession(st.runtime, st.conn, st.sampler), st.cfg
+                    )
+                except NotImplementedError as exc:
+                    console.print(f"\n  [red]{exc}[/red]\n")
+                    return
+
+                installed = {m.ref.name for m in await st.runtime.list_models()}
+                if judge_model.name not in installed:
+                    console.print(
+                        f"\n  [red]judge model {judge_model.name} is not installed.[/red]"
+                        f"\n  Pull it first, or point `judge.local_model` at one of: "
+                        f"{', '.join(sorted(installed))}\n"
+                    )
+                    return
+
+                # A judge is a benchmark as far as the rest of the app is
+                # concerned: it competes for the same GPU, and a chat message
+                # arriving mid-judging would inflate its latencies.
+                await st.lease.acquire_exclusive("judge", run_id=run_id)
+                try:
+                    console.print(f"\n  judging with [bold]{judge_model.name}[/bold]…")
+                    outcome = await judge_run(
+                        st.conn, judge_model, run_id, limit=limit, on_verdict=_tick
+                    )
+                finally:
+                    await st.lease.release_exclusive()
+
+                console.print(f"\n  {outcome['judged']} verdicts stored.")
+                if outcome["unresolved_items"]:
+                    console.print(
+                        f"  [yellow]{len(outcome['unresolved_items'])} items no longer "
+                        f"exist in their suite and were skipped.[/yellow]"
+                    )
+                if outcome["missing_suites"]:
+                    console.print(
+                        f"  [yellow]missing suites: "
+                        f"{', '.join(outcome['missing_suites'])}[/yellow]"
+                    )
+
+            _print_agreement(agreement(st.conn, run_id))
+        except KeyError as exc:
+            console.print(f"\n  [red]{exc}[/red]\n")
+        finally:
+            await shutdown_state()
+
+    asyncio.run(main())
+
+
+def _tick(row: dict, verdict) -> None:
+    mark = "[green]ok[/green]" if verdict.parse_ok else "[red]unparseable[/red]"
+    console.print(f"    {row['item_id']:<12} {row['model']:<16} {mark}", highlight=False)
+
+
+def _print_agreement(report: dict) -> None:
+    if not report.get("n"):
+        console.print(f"\n  [yellow]{report.get('note', 'nothing to compare')}[/yellow]\n")
+        return
+
+    kappa = report["kappa"]
+    # Landis & Koch's conventional bands, quoted because a bare kappa means
+    # nothing to most readers and "0.41" looks like a failing grade.
+    if kappa is None:
+        reading = "undefined — one side scored everything the same way"
+    elif kappa < 0.2:
+        reading = "[red]slight — barely better than guessing[/red]"
+    elif kappa < 0.4:
+        reading = "[yellow]fair[/yellow]"
+    elif kappa < 0.6:
+        reading = "[yellow]moderate[/yellow]"
+    elif kappa < 0.8:
+        reading = "[green]substantial[/green]"
+    else:
+        reading = "[green]almost perfect[/green]"
+
+    c = report["confusion"]
+    t = Table(
+        title=f"Judge vs deterministic graders — {report['judge_model']}",
+        title_justify="left",
+    )
+    t.add_column("metric")
+    t.add_column("value", justify="right")
+    t.add_row("items compared", str(report["n"]))
+    t.add_row("kappa", "—" if kappa is None else f"{kappa:.3f}")
+    t.add_row("agreement", f"{report['agreement_rate']:.1%}")
+    t.add_row("judge pass rate", f"{report['judge_pass_rate']:.1%}")
+    t.add_row("grader pass rate", f"{report['grader_pass_rate']:.1%}")
+    t.add_row("endorsed a wrong answer", f"{report['false_pass_rate']:.1%}")
+    t.add_row("rejected a right answer", f"{report['false_fail_rate']:.1%}")
+    t.add_row("judge unparseable", f"{report['judge_parse_failure_rate']:.1%}")
+    console.print()
+    console.print(t)
+    console.print(f"  {reading}")
+    console.print(
+        f"  [dim]confusion: both pass {c['both_pass']}, both fail {c['both_fail']}, "
+        f"judge-only {c['judge_pass_grader_fail']}, grader-only "
+        f"{c['judge_fail_grader_pass']}[/dim]"
+    )
+
+    if report["disagreements"]:
+        d = Table(title="Where they disagreed", title_justify="left")
+        d.add_column("item")
+        d.add_column("model")
+        d.add_column("grader")
+        d.add_column("judge")
+        d.add_column("judge's reason", max_width=48)
+        for row in report["disagreements"][:12]:
+            d.add_row(
+                row["item_id"], row["model"], row["grader"], row["judge"], row["reason"]
+            )
+        console.print()
+        console.print(d)
     console.print()
 
 

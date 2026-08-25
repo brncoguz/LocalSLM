@@ -12,13 +12,15 @@ import json
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from localslm.api.deps import get_state
 from localslm.api.sse import event, sse
+from localslm.bench.agreement import agreement, judge_run, pending_rows, verdicts
 from localslm.bench.determinism import stability
 from localslm.bench.graders import REGISTRY as GRADERS
+from localslm.bench.judge import build_judge
 from localslm.bench.runner import BenchRunner
 from localslm.bench.spec import BenchSpec
 from localslm.bench.stats import Interval, paired_bootstrap, rank_with_ties
@@ -27,11 +29,17 @@ from localslm.db import new_id, query
 from localslm.db import write as db_write
 from localslm.host import power_label
 from localslm.inference.lock import LeaseBusy
+from localslm.inference.session import MeasuredSession
 
 router = APIRouter(tags=["bench"])
 
 # Live runs, so the SSE endpoint can attach after the run has started.
 _ACTIVE: dict[str, dict[str, Any]] = {}
+
+# The same, for judging passes. Kept separate from `_ACTIVE` because a judging
+# pass is not a run — it produces no `runs` row and nothing to abort halfway
+# that would leave partial results, since verdicts are written as they arrive.
+_JUDGING: dict[str, dict[str, Any]] = {}
 
 
 class RunRequest(BaseModel):
@@ -448,6 +456,166 @@ async def run_thinking(run_id: str) -> dict:
         if dropped
         else None,
     }
+
+
+class JudgeRequest(BaseModel):
+    limit: int = Field(0, ge=0, le=2000)
+
+
+@router.post("/runs/{run_id}/judge")
+async def start_judging(run_id: str, body: JudgeRequest) -> dict:
+    """Score a completed run's answers with the local judge.
+
+    Detached and streamed rather than synchronous: a 9B judge takes a couple of
+    seconds per item, so a few hundred items is minutes, and holding an HTTP
+    request open for that would make a closed tab look like a failure.
+    """
+    st = get_state()
+    if not query(st.conn, "SELECT id FROM runs WHERE id = ?", (run_id,)):
+        raise HTTPException(404, f"no such run {run_id}")
+
+    # Cheapest question first, and the only one that can end the request
+    # happily. Demanding a pulled judge model before checking whether there is
+    # anything to judge turns "already done" into an error about the wrong
+    # thing — re-judging is how the pass resumes, so arriving here with nothing
+    # pending is a normal outcome.
+    pending = len(pending_rows(st.conn, run_id, body.limit))
+    if not pending:
+        return {
+            "run_id": run_id,
+            "pending": 0,
+            "note": "Every item has already been judged.",
+        }
+
+    try:
+        judge = build_judge(MeasuredSession(st.runtime, st.conn, st.sampler), st.cfg)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            501, {"error": "backend_unavailable", "message": str(exc)}
+        ) from exc
+
+    installed = {m.ref.name for m in await st.runtime.list_models()}
+    if judge.name not in installed:
+        raise HTTPException(
+            404,
+            {
+                "error": "judge_missing",
+                "model": judge.name,
+                "message": (
+                    f"The judge model {judge.name} is not installed. Pull it, or "
+                    f"point judge.local_model at one you have."
+                ),
+            },
+        )
+
+    # Same refusal as a benchmark: a judge measured while the machine thrashes
+    # produces verdicts, but its own latency and token counts are then fiction,
+    # and those land in `requests` alongside everything else.
+    sample = st.sampler.latest
+    if sample and sample.pressure == "critical":
+        raise HTTPException(
+            409,
+            {
+                "error": "memory_pressure",
+                "free_bytes": sample.free_bytes,
+                "message": (
+                    f"The machine is under critical memory pressure and the judge "
+                    f"needs to load {judge.name}. Unload a model first."
+                ),
+            },
+        )
+
+    try:
+        await st.lease.acquire_exclusive("judge", run_id, timeout_s=5)
+    except LeaseBusy as busy:
+        raise HTTPException(
+            409, {"error": "engine_busy", "holder": busy.holder, "run_id": busy.run_id}
+        ) from busy
+
+    queue: asyncio.Queue = asyncio.Queue()
+    _JUDGING[run_id] = {"queue": queue, "finished": False}
+
+    def on_verdict(row: dict, verdict) -> None:
+        queue.put_nowait(
+            {
+                "kind": "verdict",
+                "data": {
+                    "item_id": row["item_id"],
+                    "model": row["model"],
+                    "task": row["task"],
+                    "parse_ok": verdict.parse_ok,
+                    "rating": verdict.rating,
+                    "agreed": (
+                        None
+                        if verdict.passed is None
+                        else bool(verdict.passed) == bool(row["passed"])
+                    ),
+                },
+            }
+        )
+
+    async def execute() -> None:
+        try:
+            outcome = await judge_run(
+                st.conn, judge, run_id, limit=body.limit, on_verdict=on_verdict
+            )
+            queue.put_nowait({"kind": "done", "data": outcome})
+        except Exception as exc:  # surfaced on the stream, never swallowed
+            queue.put_nowait({"kind": "failed", "data": {"reason": str(exc)}})
+        finally:
+            _JUDGING[run_id]["finished"] = True
+            queue.put_nowait(None)
+            await st.lease.release_exclusive()
+
+    # Kept rather than fire-and-forget: asyncio holds only a weak reference, and
+    # a collected task would stop judging silently half way through.
+    _JUDGING[run_id]["task"] = asyncio.create_task(execute())
+    return {"run_id": run_id, "pending": pending, "judge_model": judge.name}
+
+
+@router.get("/runs/{run_id}/judge/stream")
+async def stream_judging(run_id: str) -> object:
+    active = _JUDGING.get(run_id)
+    if not active:
+        raise HTTPException(404, "no judging in progress for this run")
+
+    async def gen():
+        queue: asyncio.Queue = active["queue"]
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield event(item["kind"], item["data"])
+
+    return sse(gen())
+
+
+@router.get("/runs/{run_id}/judge-verdicts")
+async def run_judge_verdicts(
+    run_id: str,
+    only: str = Query("all", pattern="^(all|disagreements|parse_failures)$"),
+    limit: int = Query(60, ge=1, le=500),
+) -> dict:
+    """Individual judgements with the evidence behind them.
+
+    The agreement report says how often the judge was right; this says what it
+    was doing. A judge that reasons and one that pattern-matches score the same
+    until someone reads the verdicts, which is what makes this the actual
+    evaluation of the judge.
+    """
+    return verdicts(get_state().conn, run_id, only=only, limit=limit)
+
+
+@router.get("/runs/{run_id}/judge-agreement")
+async def run_judge_agreement(run_id: str) -> dict:
+    """How far the judge can be trusted on this run.
+
+    Points the judge's verdicts at the items a deterministic grader already
+    scored, so there is a number for "should I believe this" before any
+    open-ended score built on the same judge gets quoted. Read `kappa`, not
+    `agreement_rate` — see `bench/agreement.py`.
+    """
+    return agreement(get_state().conn, run_id)
 
 
 @router.get("/runs/{run_id}/determinism")

@@ -38,6 +38,10 @@ class TaskItem:
     # hallucination, which is the number that decides local-RAG viability.
     unanswerable: bool = False
     constraints: tuple[dict[str, Any], ...] = ()
+    # What "good" means for an open-ended item, handed to the judge verbatim.
+    # Written per item rather than per suite because the criterion that matters
+    # usually is the item — a suite-wide rubric collapses into "is it correct".
+    rubric: str | None = None
     verified_by: str = "llm"  # "human" once reviewed
     notes: str = ""
     tags: tuple[str, ...] = ()

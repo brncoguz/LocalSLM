@@ -18,7 +18,7 @@ There are plenty of situations where a hosted API isn't an option: data that can
 - **Conversation history:** Sessions persist in a sidebar grouped by day, and can be renamed or deleted. Reopening a conversation restores its messages along with the measurements recorded at the time. Deleting a conversation removes the transcript but keeps the measurements.
 - **Model management:** Pull models from a curated catalogue or any tag on the Ollama registry, with live download progress, throughput and ETA. Load, unload and delete without leaving the app. Each model card shows that model's measured performance.
 - **Stats dashboard:** Charts for throughput over time, speed against memory use, time-to-first-answer distribution, cold-start penalty, and the split between reasoning and answer tokens. Each model keeps a consistent colour across every chart.
-- **CLI:** `doctor` reports machine state (Ollama version, disk, memory pressure, power source), `models` lists what's installed with measured numbers, and `repair` re-scores historical rows when a metric definition changes.
+- **CLI:** `doctor` reports machine state (Ollama version, disk, memory pressure, power source), `models` lists what's installed with measured numbers, `repair` re-scores historical rows when a metric definition changes, and `judge` scores a completed run with a local judge and reports how far that judge can be trusted.
 
 ## How the measurements work
 
@@ -49,6 +49,23 @@ Sample sizes are small, so treat these as early signal. Where a claim is backed 
 - **The `think` level is binary for this model, not graded.** `low` and `high` produced identical token counts and identical timings — a measured difference of 0.000 with a zero-width interval. Ollama accepts `low`/`medium`/`high`, but `qwen3.5:4b` appears to treat anything non-false the same way.
 - **`deepseek-r1:8b` ignores `think=False`** — roughly 1,672 tokens either way. Between that and the point above, controlling reasoning to trade accuracy for speed is not portable: one model ignores the off switch, another ignores the intensity dial.
 - **A 2 GB model needed 17.8 GB at full context.** `llama3.2:3b` grows from 2.31 GB resident at 2k context to 17.77 GB at its advertised 131k limit, which is more than this machine has. File size on disk says very little about whether a model will actually run.
+- **A local 9B judge endorsed answers it had just disproved.** Calibrating
+  `qwen3.5:9b` reference-free against the deterministic graders gives kappa 0.61
+  on `qwen3.5:4b` output — substantial agreement — but the errors are all in one
+  direction: it never rejected a correct answer and passed 11% of wrong ones. On
+  `llama3.2:1b` arithmetic that rose to 60%. In the clearest case the model
+  answered 21, and the judge approved it while writing "correctly calculates the
+  remaining apples (36 - 7 = 29)" — reciting the right arithmetic and endorsing a
+  different number. A judge is worth what its agreement rate says it is worth,
+  which is why `localslm judge` reports kappa rather than raw agreement: on these
+  suites a judge that approved everything would score 89%.
+
+- **The judge found a bad test before a human did.** Of its two disagreements on
+  the mixed run, one was a genuine judge error and the other was `classify` item
+  `c10`, whose gold label was already disputed by both strong models. Pointing a
+  judge at items a grader has already scored surfaces broken items as a
+  by-product of measuring the judge.
+
 - **The peak-RAM column was measuring the machine, not the model.** Resident memory was summed across every Ollama process, so it included the ~60 MB supervisor and anything else still loaded. `llama3.2:1b` was published at 5.2 GB and actually costs 1.57 GB — over 3× off, in the column that decides whether a model fits. Weights live in a `llama-server` child that has no "ollama" in its process name, which is why the original matching reached for the sum. The runner total and the machine total are now recorded separately, and the machine total is still what decides whether a run is thrashing.
 
 - **Apple Silicon throttles ~12% on battery, and the numbers used to average across it.** `llama3.2:3b` measured 74.8 tok/s unplugged against 83.7 plugged in, roughly 100 requests either way. That gap is wider than most of the model-to-model differences here, so any rollup mixing the two sources now carries a badge saying so. It is reported rather than filtered: of six models measured, only one has data on both sources, so an AC-only table would be nearly empty.
@@ -128,7 +145,7 @@ tests/                   offline by default; -m integration needs Ollama
 - [ ] **Phase 2b** — test suites, graders, matrix runner, bootstrap confidence intervals
 - [ ] **Phase 3** — context scaling, memory envelope, thermal drift, energy, needle-in-a-haystack
 - [ ] **Phase 4** — reasoning economics, quantisation ladder
-- [ ] **Phase 5** — LLM-as-judge, blind arena, generated technical report
+- [ ] **Phase 5** — LLM-as-judge (client + calibration done), blind arena, generated technical report
 
 ## Tests
 

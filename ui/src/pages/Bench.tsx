@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle, CheckCircle2, ChevronRight, Loader2, Play, Trash2, XCircle,
+  AlertTriangle, CheckCircle2, ChevronRight, Loader2, Play, RotateCcw, Trash2, XCircle,
 } from "lucide-react";
 import {
   api, streamGet, type CellResult, type RunDetail, type RunRow, type SuiteInfo,
@@ -8,6 +8,7 @@ import {
 import { Badge, Button } from "@/components/ui/primitives";
 import { ScoreBars } from "@/components/charts/ScoreBars";
 import { DeterminismPanel } from "@/components/charts/DeterminismPanel";
+import { JudgePanel } from "@/components/charts/JudgePanel";
 import { ThinkingCurve } from "@/components/charts/ThinkingCurve";
 import { TtftVsTtfat } from "@/components/charts/TtftVsTtfat";
 import { cn, modelColor } from "@/lib/utils";
@@ -48,14 +49,19 @@ export function Bench({ models }: { models: string[] }) {
   const cellCount = pickedModels.length * Math.max(think.length, 1) * Math.max(temps.length, 1);
   const estimate = cellCount * itemCount * repeats + cellCount * pickedSuites.length;
 
-  async function start() {
+  /** Start a run from the form, or from a spec lifted off an earlier one.
+   *  Same path either way — a rerun that took a different route could drift
+   *  from the original in ways the comparison would then read as a result. */
+  async function start(override?: Parameters<typeof api.startRun>[0]) {
     setError(null);
     setProgress(null);
     try {
-      const { run_id } = await api.startRun({
-        models: pickedModels, suites: pickedSuites, repeats,
-        think_levels: think, temperatures: temps, label: "ui",
-      });
+      const { run_id } = await api.startRun(
+        override ?? {
+          models: pickedModels, suites: pickedSuites, repeats,
+          think_levels: think, temperatures: temps, label: "ui",
+        },
+      );
       setRunning(run_id);
       const ctrl = new AbortController();
       abortRef.current = ctrl;
@@ -81,6 +87,37 @@ export function Bench({ models }: { models: string[] }) {
       setRunning(null);
       setProgress(null);
       void refresh();
+    }
+  }
+
+  /** Repeat an earlier run's experiment exactly.
+   *
+   *  The plan is re-read from the server rather than reconstructed from the
+   *  row, because the row carries only what the list needs to render — think
+   *  levels, repeats and temperatures live in the stored plan, and silently
+   *  defaulting any of them would produce a run that looks comparable and
+   *  isn't. */
+  async function rerun(runId: string) {
+    setError(null);
+    try {
+      const detail = await api.run(runId);
+      const plan = detail.plan;
+      if (!plan?.models?.length || !plan?.suites?.length) {
+        setError("That run did not record enough of its plan to repeat it.");
+        return;
+      }
+      await start({
+        models: plan.models,
+        suites: plan.suites.map((s) => s.name),
+        repeats: plan.repeats,
+        think_levels: plan.think_levels,
+        // Runs from before the plan recorded temperatures fall back to the
+        // default rather than inventing a sweep the original never had.
+        temperatures: plan.temperatures ?? [0],
+        label: `rerun of ${detail.label || runId.slice(0, 8)}`,
+      });
+    } catch (e: any) {
+      setError(e?.detail?.message ?? e?.message ?? "Could not repeat that run.");
     }
   }
 
@@ -199,7 +236,9 @@ export function Bench({ models }: { models: string[] }) {
             {runs.map((r) => (
               <RunCard key={r.id} run={r}
                 open={openRun === r.id}
+                busy={!!running}
                 onToggle={() => setOpenRun(openRun === r.id ? null : r.id)}
+                onRerun={() => void rerun(r.id)}
                 onDeleted={() => { setOpenRun(null); void refresh(); }} />
             ))}
           </div>
@@ -240,9 +279,10 @@ function Picker({
 }
 
 function RunCard({
-  run, open, onToggle, onDeleted,
+  run, open, busy: engineBusy, onToggle, onRerun, onDeleted,
 }: {
-  run: RunRow; open: boolean; onToggle: () => void; onDeleted: () => void;
+  run: RunRow; open: boolean; busy: boolean;
+  onToggle: () => void; onRerun: () => void; onDeleted: () => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -289,6 +329,19 @@ function RunCard({
             <span className="tnum shrink-0 text-sm font-semibold">{run.best_score.toFixed(2)}</span>
           )}
         </button>
+        <Button
+          size="icon"
+          variant="ghost"
+          title={
+            engineBusy
+              ? "A run is already using the engine"
+              : `Run this experiment again — same models, suites, think levels and repeats`
+          }
+          disabled={busy || engineBusy}
+          onClick={onRerun}
+        >
+          <RotateCcw size={13} />
+        </Button>
         <Button size="icon" variant="ghost" title="Delete this run"
           disabled={busy} onClick={() => setConfirming(true)}>
           {busy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
@@ -321,6 +374,7 @@ function RunCard({
               <ThinkingCurve runId={run.id} />
               <TtftVsTtfat runId={run.id} />
               <DeterminismPanel runId={run.id} />
+              <JudgePanel runId={run.id} />
             </div>
           ) : (
             <p className="text-[11px] text-faint">Loading…</p>

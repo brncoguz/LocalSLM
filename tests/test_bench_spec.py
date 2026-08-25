@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from itertools import pairwise
 
-from localslm.bench.spec import BenchSpec, order_units, unit_seed
+from localslm.bench.spec import BenchSpec, order_units, summarise_plan, unit_seed
 from localslm.bench.suites import Suite, TaskItem
 
 
@@ -287,3 +287,17 @@ def test_context_length_is_pinned_not_inherited():
     assert ctx(()) == NUM_CTX_DIRECT
     assert ctx((("think", "high"),)) == NUM_CTX_THINKING
     assert NUM_CTX_THINKING > NUM_CTX_DIRECT
+
+
+def test_the_plan_records_every_axis_a_rerun_needs():
+    """The plan is what "run this again" is rebuilt from, so an axis missing
+    here comes back silently at its default — producing a run that looks
+    comparable to the original and isn't."""
+    s = spec(think_levels=[False, "high"], temperatures=[0.0, 0.7])
+    plan = summarise_plan(s, order_units(s, 0))
+
+    assert plan["models"] == s.models
+    assert [x["name"] for x in plan["suites"]] == [x.name for x in s.suites]
+    assert plan["temperatures"] == [0.0, 0.7]
+    assert plan["think_levels"] == ["False", "high"]
+    assert plan["repeats"] == s.repeats

@@ -40,13 +40,37 @@ cheapest path to the project's strongest finding.
 
 ## Phase 5 — judging, arena, report
 
-- [ ] **5.1** Judge client — local `qwen3.5:9b` default, Claude behind a flag
-- [ ] **5.2** Rubric grader for open-ended answers
+- [x] **5.1** Judge client — local `qwen3.5:9b`, measured as `kind='judge'` with
+      `parent_id` pointing at the request it graded. Claude backend refuses
+      loudly rather than falling back; no SDK or key here to verify it against.
+- [x] **5.1b** `localslm judge <run_id>` + `GET /api/runs/{id}/judge-agreement`
+      — reference-free calibration against the deterministic graders, reporting
+      Cohen's kappa rather than raw agreement
+- [x] **5.1c** `JudgePanel` on the run detail — kappa against the Landis-Koch
+      bands, a 2x2 confusion grid colouring the two error directions
+      differently, and the disagreements with the judge's own reasoning
+- [x] **5.1e** Verdict browser — every judgement with the answer it graded, both
+      verdicts, the raw reply and the judge's own prompt, plus a rating-spread
+      chart. Evaluating the judge needs its reasoning, not just its score.
+- [x] **5.1d** Trigger judging from the UI — `POST /runs/{id}/judge` plus an
+      SSE progress stream, mirroring how benchmarks start. Batches of 40, since
+      a 9B judge is ~2.5 s per item and a ten-minute button feels broken
+- [ ] **5.2** Rubric grader for open-ended answers — grader written, registered
+      and tested, but not yet usable in a run: there is no open-ended suite, and
+      nothing calls the judge during grading. Wire it as a **post-run pass**,
+      not inline — swapping a 9B judge in and out per item would thrash a 16 GB
+      machine, for the same reason `order_units` blocks by model.
 - [ ] **5.3** Pairwise comparison with order swapping + Bradley-Terry Elo
 - [ ] **5.4** Arena UI: blind side-by-side with voting
 - [ ] **5.5** `prompt_injection` suite + grader
 - [ ] **5.6** `probes/long_convo.py` — recall vs conversation depth
 - [ ] **5.7** Report generator — markdown + self-contained HTML, dependency-free SVG
+
+## Bench UI
+
+- [x] Rerun button on a run card — repeats the stored plan exactly. Required
+      adding `temperatures` to `summarise_plan`, which the plan had been
+      omitting, so a repeat would silently have dropped that axis.
 
 ## GitHub automation
 
@@ -57,6 +81,18 @@ cheapest path to the project's strongest finding.
 - [x] Nightly macOS integration tests against a real Ollama — correctness only
 - [ ] Publish the phase-5 technical report to Pages alongside the demo
 - [ ] Refresh `ui/src/fixtures/demo.json` whenever notable new runs land
+
+## Judge findings
+
+- [ ] **The local judge is systematically lenient.** Across 23 reference-free
+      verdicts it never rejected a correct answer, but endorsed wrong ones at
+      11% on `qwen3.5:4b` and 60% on `llama3.2:1b`. Any score built on it is
+      biased upward, and by an amount that depends on the model being graded —
+      which is the worst shape for a bias to have.
+- [ ] Re-check kappa on a larger sample; 18 items is thin for a rate.
+- [ ] Try a reference-based variant as a second axis: the gap between
+      reference-free and reference-given is a measurement of how much of the
+      judge's verdict is verification rather than plausibility.
 
 ## Known issues
 
@@ -70,6 +106,7 @@ cheapest path to the project's strongest finding.
       thinking cells, and truncation is flagged as its own metric
 
 - [ ] `classify` item `c10` has a contested gold label — both strong models say
-      neutral, the suite says positive
+      neutral, the suite says positive. The judge independently sided with the
+      models on 2026-08-25, which is now three votes against the suite.
 - [ ] `grounded_qa` may be too easy: hallucination rate is 0.00 for every model,
       and the prompt explicitly offers an "out"
