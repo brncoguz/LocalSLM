@@ -22,9 +22,10 @@ from localslm.runtimes.base import (
     Chunk,
     GenRequest,
     GenResult,
+    LoadedModel,
     ServerTiming,
 )
-from localslm.telemetry.sampler import SystemSampler
+from localslm.telemetry.sampler import SampleWindow, SystemSampler
 
 # Full outputs are kept so a grader bugfix can re-score without re-running
 # inference, but a runaway generation shouldn't bloat the row.
@@ -74,7 +75,7 @@ class MeasuredSession:
 
         # Ask whether the weights are already resident *before* starting the
         # clock, so this lookup never lands inside a latency measurement.
-        pre_resident = await self._is_resident(req.model.name)
+        pre_resident, pre_entry = await self._loaded_entry(req.model.name)
 
         t_start = time.perf_counter()
         t_prev: float | None = None
@@ -114,19 +115,31 @@ class MeasuredSession:
         result.thinking = "".join(thinking)
         result.cold = _was_cold(pre_resident, result.server)
 
-        self._persist(req, result, prov, t_start, t_end)
+        # Ask again now the weights are certainly resident: a cold request has
+        # nothing to attribute in the *pre* snapshot. The clock has already
+        # stopped, so this cannot land inside a latency measurement either.
+        _, post_entry = await self._loaded_entry(req.model.name)
+
+        self._persist(req, result, prov, t_start, t_end, post_entry or pre_entry)
         yield None, result
 
-    async def _is_resident(self, name: str) -> bool | None:
-        """True/False from the runtime's loaded set, or None if it can't say.
+    async def _loaded_entry(self, name: str) -> tuple[bool | None, LoadedModel | None]:
+        """(is_resident, this model's entry) from the runtime's loaded set.
 
-        None is a real answer, not an error: it routes `_was_cold` to the
-        load-duration fallback rather than silently guessing "warm".
+        None residency is a real answer, not an error: it routes `_was_cold` to
+        the load-duration fallback rather than silently guessing "warm", and it
+        is distinct from False, which means the runtime answered "not loaded".
+
+        Returning the entry as well as the flag is what makes per-model memory
+        attribution free — this call already happens outside the latency
+        window, and used to throw away everything except the boolean.
         """
         try:
-            return any(m.name == name for m in await self.runtime.loaded())
+            loaded = await self.runtime.loaded()
         except Exception:
-            return None
+            return None, None
+        entry = next((m for m in loaded if m.name == name), None)
+        return entry is not None, entry
 
     async def generate(self, req: GenRequest, prov: Provenance | None = None) -> GenResult:
         result: GenResult | None = None
@@ -145,6 +158,7 @@ class MeasuredSession:
         prov: Provenance,
         t_start: float,
         t_end: float,
+        loaded: LoadedModel | None = None,
     ) -> None:
         window = self.sampler.window(t_start, t_end)
         srv = result.server
@@ -210,6 +224,7 @@ class MeasuredSession:
             "answer_tokens": result.answer_chunks,
             "cold": int(result.cold),
             "peak_rss_bytes": window.peak_rss_bytes or None,
+            "model_vram_bytes": _attributed_bytes(loaded, window),
             "swap_delta_bytes": window.swap_delta_bytes,
             "mem_pressure": window.pressure_max,
             "energy_j": window.energy_j,
@@ -235,6 +250,27 @@ class MeasuredSession:
     @property
     def last_request_id(self) -> str | None:
         return getattr(self, "_last_id", None)
+
+
+def _attributed_bytes(entry: LoadedModel | None, window: SampleWindow) -> int | None:
+    """Resident bytes chargeable to *this* model, or None when it can't be said.
+
+    Two sources, in order of preference. Measured runner RSS is what the
+    machine actually paid, but it is only attributable when a single runner
+    process was up for the whole window — Compare mode routinely breaks that.
+    Ollama's own `/api/ps` accounting is per-model by construction and survives
+    several models being loaded, but on unified memory `size_vram` echoes the
+    file size, so it is an allocation estimate rather than a measurement. On an
+    M1 Pro the two agree within 1%.
+
+    None rather than 0, because "this could not be attributed" and "this model
+    used no memory" are different claims and the second is never true.
+    """
+    if window.runner_count_max == 1 and window.peak_runner_rss_bytes:
+        return window.peak_runner_rss_bytes
+    if entry is not None:
+        return entry.size_vram_bytes or entry.size_bytes or None
+    return None
 
 
 def _was_cold(pre_resident: bool | None, server: ServerTiming | None) -> bool:

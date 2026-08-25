@@ -34,21 +34,25 @@ Time to first answer token is tracked separately from time to first token. Reaso
 
 ## Results so far
 
-| Model | tok/s | Time to answer | Peak RAM | Cold start |
+| Model | tok/s | Time to answer | Model RAM | Cold start |
 |---|---:|---:|---:|---:|
-| llama3.2:1b | 198.2 | 0.20 s | 5.2 GB | 78× |
-| llama3.2:3b | 91.4 | 0.35 s | 2.7 GB | 8.0× |
-| gemma3:4b | 60.6 | 0.48 s | 6.1 GB | 10.9× |
-| qwen3.5:9b | 41.7 | 0.53 s | 6.5 GB | — |
-| qwen3.5:4b | 38.7 | 0.54 s | 6.2 GB | 14.0× |
-| deepseek-r1:8b | 23.0 | 72.9 s | 6.1 GB | — |
+| llama3.2:1b | 198.2 | 0.20 s | 1.57 GB | 78× |
+| llama3.2:3b | 91.4 | 0.35 s | 2.59 GB | 8.0× |
+| gemma3:4b | 60.6 | 0.48 s | 4.31 GB | 10.9× |
+| qwen3.5:9b | 41.7 | 0.53 s | — | — |
+| qwen3.5:4b | 38.7 | 0.54 s | 4.29 GB | 14.0× |
+| deepseek-r1:8b | 23.0 | 72.9 s | — | — |
 
-Sample sizes are small, so treat these as early signal. Where a claim is backed by a paired bootstrap the interval is quoted; where it isn't, it isn't.
+Sample sizes are small, so treat these as early signal. Where a claim is backed by a paired bootstrap the interval is quoted; where it isn't, it isn't. Model RAM is the memory charged to that model alone; the two models showing `—` have since been deleted locally, so they were never re-measured under per-model attribution.
 
 - **Reasoning tripled accuracy on arithmetic, and cost 67× the latency.** `qwen3.5:4b` on nine shared maths items scored 0.33 with thinking off and 1.00 with it on — a paired gain of +0.667 (95% CI [+0.333, +1.000], n=9). It answers in 0.5 s without reasoning and 33.6 s with it, spending roughly 1,010 tokens thinking before writing one line.
 - **The `think` level is binary for this model, not graded.** `low` and `high` produced identical token counts and identical timings — a measured difference of 0.000 with a zero-width interval. Ollama accepts `low`/`medium`/`high`, but `qwen3.5:4b` appears to treat anything non-false the same way.
 - **`deepseek-r1:8b` ignores `think=False`** — roughly 1,672 tokens either way. Between that and the point above, controlling reasoning to trade accuracy for speed is not portable: one model ignores the off switch, another ignores the intensity dial.
 - **A 2 GB model needed 17.8 GB at full context.** `llama3.2:3b` grows from 2.31 GB resident at 2k context to 17.77 GB at its advertised 131k limit, which is more than this machine has. File size on disk says very little about whether a model will actually run.
+- **The peak-RAM column was measuring the machine, not the model.** Resident memory was summed across every Ollama process, so it included the ~60 MB supervisor and anything else still loaded. `llama3.2:1b` was published at 5.2 GB and actually costs 1.57 GB — over 3× off, in the column that decides whether a model fits. Weights live in a `llama-server` child that has no "ollama" in its process name, which is why the original matching reached for the sum. The runner total and the machine total are now recorded separately, and the machine total is still what decides whether a run is thrashing.
+
+- **Apple Silicon throttles ~12% on battery, and the numbers used to average across it.** `llama3.2:3b` measured 74.8 tok/s unplugged against 83.7 plugged in, roughly 100 requests either way. That gap is wider than most of the model-to-model differences here, so any rollup mixing the two sources now carries a badge saying so. It is reported rather than filtered: of six models measured, only one has data on both sources, so an AC-only table would be nearly empty.
+
 - **Cold-start detection was wrong at first.** Ollama reports 137–305 ms of `load_duration` even when the weights are already resident, so an initial threshold of 100 ms flagged every request as cold. Residency is now read from `/api/ps` before the request starts, and `localslm repair` re-scores the older rows.
 
 Some models in the table have since been deleted locally. Their measurements survive because the `requests` rows outlive the weights, which is deliberate.

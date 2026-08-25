@@ -5,6 +5,11 @@ not in the component.** Warmups, swapped windows and pressure-poisoned rows are
 kept in the table so they stay visible in the trace inspector, and a chart that
 had to remember to filter them would eventually forget.
 
+The second rule is the same idea applied to confounds rather than bad rows:
+**a rollup that mixes power sources says so.** See `power_split` — it is not a
+filter, because the fix for a confound you cannot control is to report it, not
+to quietly drop half the corpus.
+
 Percentiles are computed in Python rather than SQL because SQLite has no
 percentile function, and at this scale (thousands of rows) the difference is
 not worth a window-function query nobody can read.
@@ -31,7 +36,7 @@ POINT_COLUMNS = """
     id, ts, model, kind, think, cold,
     decode_tps, prefill_tps, ttft_ms, ttfat_ms, total_ms,
     prompt_tokens, output_tokens, thinking_tokens, answer_tokens,
-    peak_rss_bytes, srv_load_ms, itl_stddev_ms
+    peak_rss_bytes, model_vram_bytes, on_ac, srv_load_ms, itl_stddev_ms
 """
 
 
@@ -51,6 +56,37 @@ def _spread(values: list[float]) -> dict[str, float] | None:
     }
 
 
+def power_split(rows: list[Row]) -> dict[str, Any]:
+    """Throughput broken out by power source, plus whether the two got mixed.
+
+    Apple Silicon throttles hard on battery. `llama3.2:3b` measured 74.8 tok/s
+    unplugged against 83.7 plugged in, ~100 requests either way — averaging
+    those turns a 12% charger effect into an apparent model difference, and any
+    model-vs-model gap narrower than that is unreadable without knowing the
+    split. So the split travels with every rollup, and `mixed` says whether the
+    headline figure sitting above it is honest.
+
+    Deliberately not a filter. Only one of the six models measured so far has
+    rows on both power sources, so dropping to AC-only to be "clean" would
+    delete most of the results table. Report it, don't hide it.
+    """
+    ac = [r for r in rows if r["on_ac"] == 1]
+    battery = [r for r in rows if r["on_ac"] == 0]
+    return {
+        "mixed": bool(ac and battery),
+        "ac": {
+            "n": len(ac),
+            "decode_tps": _spread([r["decode_tps"] for r in ac]),
+            "ttfat_ms": _spread([r["ttfat_ms"] for r in ac]),
+        },
+        "battery": {
+            "n": len(battery),
+            "decode_tps": _spread([r["decode_tps"] for r in battery]),
+            "ttfat_ms": _spread([r["ttfat_ms"] for r in battery]),
+        },
+    }
+
+
 def summarise(rows: list[Row]) -> dict[str, Any]:
     """Per-model rollup. `n` travels with every figure so the UI can refuse to
     draw a trend through two points."""
@@ -66,7 +102,12 @@ def summarise(rows: list[Row]) -> dict[str, Any]:
         "ttfat_ms": _spread([r["ttfat_ms"] for r in rows]),
         "ttft_ms": _spread([r["ttft_ms"] for r in rows]),
         "total_ms": _spread([r["total_ms"] for r in rows]),
+        # Machine total vs. what this model can actually be charged for. They
+        # were the same number until per-runner attribution landed, and the
+        # difference is a supervisor plus any other resident model.
         "peak_rss_bytes": _spread([r["peak_rss_bytes"] for r in rows]),
+        "model_vram_bytes": _spread([r["model_vram_bytes"] for r in rows]),
+        "power": power_split(rows),
         "cold": {
             "n": len(cold),
             "load_ms": _spread([r["srv_load_ms"] for r in cold]),

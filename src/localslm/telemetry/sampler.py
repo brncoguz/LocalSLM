@@ -66,10 +66,29 @@ def _pressure_from_free(free_pct: float) -> Pressure:
     return "normal"
 
 
+def _is_supervisor(name: str, exe: str, cmdline: list[str]) -> bool:
+    """`ollama serve` itself, as opposed to a runner child it spawned.
+
+    The runner is a differently-named binary (`llama-server` today) living
+    under the Ollama install prefix, so the exe path matches but the basename
+    does not. Checking the subcommand as well keeps a future `ollama runner`
+    child from being mistaken for the supervisor.
+    """
+    basename = exe.rsplit("/", 1)[-1] or name
+    if basename not in ("ollama", "ollama.exe"):
+        return False
+    return "serve" in [a.lower() for a in cmdline[1:]]
+
+
 @dataclass(frozen=True)
 class SystemSample:
     t_mono: float
+    # Every Ollama process including the supervisor: the machine-level figure,
+    # and the right input to the swap/pressure decision.
     ollama_rss_bytes: int
+    # Inference runners only. Attributable to a model when exactly one is up.
+    runner_rss_bytes: int
+    runner_count: int
     free_bytes: int
     swap_used_bytes: int
     pressure: Pressure
@@ -86,6 +105,11 @@ class SampleWindow:
     mean_rss_bytes: float
     swap_delta_bytes: int
     pressure_max: Pressure
+    # Runner processes only, so this can be charged to a model — but only when
+    # `runner_count_max` is 1. With several runners up the peak is a sum again
+    # and the caller must fall back to Ollama's own per-model accounting.
+    peak_runner_rss_bytes: int = 0
+    runner_count_max: int = 0
     # Stays None until a power-instrumented run fills it in. At 4 Hz sampling a
     # two-second request has ~8 samples plus an unattributable baseline draw, so
     # a per-request joule figure would describe noise, not the model. Energy is
@@ -132,32 +156,44 @@ class SystemSampler:
 
     # -- sampling ---------------------------------------------------------
 
-    def _runner_rss(self) -> int:
-        """Total resident bytes across every Ollama inference process.
+    def _runner_rss(self) -> tuple[int, int, int]:
+        """Return (total_rss, runner_rss, runner_count).
 
-        `ollama serve` is a ~10 MB supervisor; the weights live in a
-        `llama-server` (or MLX runner) child it spawns, which does not have
-        "ollama" in its process name. Matching on name alone silently reports
-        10 MB for a 9B model. We match the executable path instead, and sum —
-        Compare mode can have several runners resident at once, and the
-        interesting question is always the total against the 16 GB ceiling.
+        `ollama serve` is a supervisor — ~30 MB idle, ~60 MB with a model up;
+        the weights live in a `llama-server` (or MLX runner) child it spawns,
+        which does not have "ollama" in its process *name*, only in its exe
+        path. Matching on name alone silently reports 60 MB for a 9B model.
+
+        Both figures are kept because they answer different questions. The
+        total is what to compare against the 16 GB ceiling and what decides
+        whether the machine is thrashing. The runner-only figure is the one
+        that can be attributed to a model — but only when a single runner is
+        resident, which is why the count comes back with it. Summing the two
+        roles into one number is what made a 1B model read 5.2 GB.
         """
         total = 0
-        for proc in psutil.process_iter(["name", "exe", "memory_info"]):
+        runner = 0
+        count = 0
+        for proc in psutil.process_iter(["name", "exe", "cmdline", "memory_info"]):
             try:
                 info = proc.info
                 name = (info["name"] or "").lower()
                 exe = (info["exe"] or "").lower()
                 if "ollama" not in name and "ollama" not in exe:
                     continue
-                if mem := info["memory_info"]:
-                    total += mem.rss
+                mem = info["memory_info"]
+                if not mem:
+                    continue
+                total += mem.rss
+                if not _is_supervisor(name, exe, info["cmdline"] or []):
+                    runner += mem.rss
+                    count += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        return total
+        return total, runner, count
 
     def _sample(self) -> SystemSample:
-        rss = self._runner_rss()
+        rss, runner_rss, runner_count = self._runner_rss()
         swap, free_pct = _vm_stat()
         pressure = _pressure_from_free(free_pct)
         if pressure == "critical":
@@ -165,6 +201,8 @@ class SystemSampler:
         return SystemSample(
             t_mono=time.perf_counter(),
             ollama_rss_bytes=rss,
+            runner_rss_bytes=runner_rss,
+            runner_count=runner_count,
             free_bytes=int(psutil.virtual_memory().available),
             swap_used_bytes=swap,
             pressure=pressure,
@@ -204,6 +242,7 @@ class SystemSampler:
         if not rows:
             return SampleWindow(0, duration, 0, 0.0, 0, "normal")
         rss = [s.ollama_rss_bytes for s in rows]
+        runner_rss = [s.runner_rss_bytes for s in rows]
         swaps = [s.swap_used_bytes for s in rows]
         order: dict[str, int] = {"normal": 0, "warn": 1, "critical": 2}
         worst = max(rows, key=lambda s: order[s.pressure]).pressure
@@ -215,6 +254,8 @@ class SystemSampler:
             swap_delta_bytes=max(0, swaps[-1] - swaps[0]),
             pressure_max=worst,
             energy_j=None,
+            peak_runner_rss_bytes=max(runner_rss),
+            runner_count_max=max(s.runner_count for s in rows),
         )
 
     def series(self, t0: float, t1: float, hz: float = 1.0) -> list[SystemSample]:

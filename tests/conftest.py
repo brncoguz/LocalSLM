@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from localslm.db import connect
-from localslm.runtimes.base import Chunk, ModelRef
+from localslm.runtimes.base import Chunk, LoadedModel, ModelRef
 
 
 class FakeRuntime:
@@ -34,9 +34,18 @@ class FakeRuntime:
 
     name = "fake"
 
-    def __init__(self, script, server: dict | None = None):
+    def __init__(self, script, server: dict | None = None, loaded=None):
         self.script = script
         self.server = server or {}
+        # None means "this runtime cannot answer", which the session must keep
+        # distinct from "nothing is loaded" — the first falls back to the
+        # load-duration rule, the second is a definitive cold.
+        self._loaded = loaded
+
+    async def loaded(self):
+        if self._loaded is None:
+            raise RuntimeError("runtime cannot say what is loaded")
+        return self._loaded
 
     async def stream(self, req) -> AsyncIterator[Chunk]:
         base = time.perf_counter()
@@ -65,3 +74,11 @@ def conn(tmp_path):
 @pytest.fixture
 def model_ref():
     return ModelRef(runtime="fake", name="test:4b", quant="Q4_K_M", params_b=4.0)
+
+
+@pytest.fixture
+def loaded_entry():
+    """What `/api/ps` says about the model under test while it is resident."""
+    return LoadedModel(
+        name="test:4b", size_bytes=3_400_000_000, size_vram_bytes=3_400_000_000
+    )

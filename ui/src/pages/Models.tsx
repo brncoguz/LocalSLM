@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import {
-  AlertTriangle, Check, Download, Flame, Loader2, Search,
+  AlertTriangle, BatteryMedium, Check, Download, Flame, Loader2, Search,
   Snowflake, Trash2, X, Zap,
 } from "lucide-react";
 import {
@@ -238,12 +238,30 @@ function ModelTile({
         <div className="mt-3.5 grid grid-cols-3 gap-3 border-t border-border pt-3">
           {h?.decode_tps ? (
             <>
-              <Stat label="tok/s" value={h.decode_tps.toFixed(1)} color={color} sub={`n=${h.n}`}
+              <Stat
+                label="tok/s"
+                value={
+                  <span className="inline-flex items-center gap-1.5">
+                    {h.decode_tps.toFixed(1)}
+                    {h.on_ac_min !== h.on_ac_max && (
+                      <Badge tone="warn" title="Averages battery and AC measurements — worth ~12% on Apple Silicon.">
+                        <BatteryMedium size={10} />
+                      </Badge>
+                    )}
+                  </span>
+                }
+                color={color}
+                sub={`n=${h.n}`}
                 hint="Mean decode throughput across measured requests." />
               <Stat label="to answer" value={fmt.ms(h.ttfat_ms)}
                 hint="Mean time to first answer token — excludes internal reasoning." />
-              <Stat label="peak RAM" value={fmt.gb(h.peak_rss_bytes)}
-                hint="Peak resident memory of the Ollama runner while generating." />
+              <Stat label="model RAM" value={h.model_vram_bytes ? fmt.gb(h.model_vram_bytes) : "—"}
+                sub={h.peak_rss_bytes ? `machine ${fmt.gb(h.peak_rss_bytes)}` : undefined}
+                hint={
+                  h.model_vram_bytes
+                    ? "Peak resident memory charged to this model, excluding the Ollama supervisor and any other loaded model."
+                    : "Not attributed — measured before per-runner memory attribution. Send it a message to populate."
+                } />
             </>
           ) : (
             <div className="col-span-3 text-[11px] text-faint">

@@ -1,6 +1,8 @@
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { Slot } from "@radix-ui/react-slot";
+import { BatteryMedium } from "lucide-react";
+import type { PowerSplit } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
@@ -75,6 +77,29 @@ export function Badge({
   ...props
 }: React.HTMLAttributes<HTMLSpanElement> & VariantProps<typeof badgeVariants>) {
   return <span className={cn(badgeVariants({ tone }), className)} {...props} />;
+}
+
+/** Flags a figure that averages battery and AC measurements together.
+ *  Apple Silicon throttles ~12% unplugged, which is wider than most of the
+ *  model-to-model gaps on this dashboard — so a mixed figure is not wrong so
+ *  much as unreadable, and it should say so rather than look precise. */
+export function PowerBadge({ power }: { power: PowerSplit | undefined }) {
+  if (!power?.mixed) return null;
+  const ac = power.ac.decode_tps?.p50;
+  const batt = power.battery.decode_tps?.p50;
+  const gap = ac && batt ? Math.abs(ac - batt) / Math.max(ac, batt) : null;
+  return (
+    <Badge
+      tone="warn"
+      title={
+        `Mixes ${power.ac.n} request(s) on AC with ${power.battery.n} on battery` +
+        (ac && batt ? ` — ${ac.toFixed(1)} vs ${batt.toFixed(1)} tok/s` : "")
+      }
+    >
+      <BatteryMedium size={11} />
+      mixed power{gap != null ? ` · ${(gap * 100).toFixed(0)}%` : ""}
+    </Badge>
+  );
 }
 
 /** A headline number with its unit and an optional caveat.

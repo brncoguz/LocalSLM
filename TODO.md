@@ -26,15 +26,16 @@ cheapest path to the project's strongest finding.
 
 ## Phase 3 — systems probes
 
-- [ ] **3.1** Fix per-runner memory attribution — currently sums every Ollama
-      process, which is why `llama3.2:1b` reads 5.2 GB. Blocks everything below.
+- [x] **3.1** Fix per-runner memory attribution — was summing every Ollama
+      process, which is why `llama3.2:1b` read 5.2 GB. Runner and machine
+      totals are now separate; `llama3.2:1b` measures 1.57 GB.
 - [ ] **3.2** `probes/context_sweep.py` — TTFT and prefill rate vs prompt length
 - [ ] **3.3** `probes/memory_envelope.py` — resident RAM vs `num_ctx`, "what fits"
 - [ ] **3.4** `probes/cold_warm.py` — load penalty, properly repeated
 - [ ] **3.5** `probes/sustained.py` — 10-minute thermal drift
 - [ ] **3.6** `probes/multiturn.py` — prompt-cache speedup, turn 5 vs turn 1
 - [ ] **3.7** `needle` suite + grader — depth x length haystack
-- [ ] **3.8** Battery-vs-AC axis, plus a guard against averaging the two together
+- [x] **3.8** Battery-vs-AC axis, plus a guard against averaging the two together
 - [ ] **3.9** Charts: context curve, memory envelope, thermal drift, needle heatmap
 
 ## Phase 5 — judging, arena, report
@@ -47,6 +48,16 @@ cheapest path to the project's strongest finding.
 - [ ] **5.6** `probes/long_convo.py` — recall vs conversation depth
 - [ ] **5.7** Report generator — markdown + self-contained HTML, dependency-free SVG
 
+## GitHub automation
+
+- [x] CI — ruff, offline pytest, UI typecheck/build on push and PR
+- [x] MIT license, README badges, 9 repo topics, homepage URL
+- [x] Dependabot (pip, npm, actions) + CodeQL (python, js)
+- [x] Static demo on GitHub Pages, fixture captured via `make demo-data`
+- [x] Nightly macOS integration tests against a real Ollama — correctness only
+- [ ] Publish the phase-5 technical report to Pages alongside the demo
+- [ ] Refresh `ui/src/fixtures/demo.json` whenever notable new runs land
+
 ## Known issues
 
 - [ ] **Long reasoning runs push this machine into swap**, so units get excluded
@@ -58,7 +69,6 @@ cheapest path to the project's strongest finding.
       mid-thought so it scored zero for running out of room~~ — now 8192 for
       thinking cells, and truncation is flagged as its own metric
 
-- [ ] Peak-RAM figures sum all Ollama processes (see 3.1)
 - [ ] `classify` item `c10` has a contested gold label — both strong models say
       neutral, the suite says positive
 - [ ] `grounded_qa` may be too easy: hallucination rate is 0.00 for every model,

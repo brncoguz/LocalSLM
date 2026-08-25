@@ -272,3 +272,86 @@ class TestCrossProcessLease:
         await bench.release_exclusive()
         await api.acquire_shared()  # allowed once the benchmark finishes
         await api.release_shared()
+
+
+class TestMemoryAttribution:
+    """Peak RAM used to sum every Ollama process, so a 1B model read 5.2 GB —
+    the supervisor plus whatever else happened to be resident. These pin down
+    which figure gets charged to the model and which describes the machine."""
+
+    @pytest.mark.asyncio
+    async def test_memory_is_charged_to_the_model_not_the_machine(
+        self, conn, model_ref, loaded_entry
+    ):
+        """One runner up: the measured runner peak is attributable, and the
+        machine total stays separately available rather than being overwritten."""
+        session = MeasuredSession(
+            FakeRuntime([(0.1, "", "hi")], SERVER, loaded=[loaded_entry]),
+            conn,
+            FakeSampler(
+                clean_window(
+                    peak_rss_bytes=6_000_000_000,
+                    peak_runner_rss_bytes=1_500_000_000,
+                    runner_count_max=1,
+                )
+            ),
+        )
+        await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        row = query(conn, "SELECT peak_rss_bytes, model_vram_bytes FROM requests")[0]
+        assert row["model_vram_bytes"] == 1_500_000_000
+        assert row["peak_rss_bytes"] == 6_000_000_000
+
+    @pytest.mark.asyncio
+    async def test_several_runners_fall_back_to_ollamas_own_accounting(
+        self, conn, model_ref, loaded_entry
+    ):
+        """Compare mode keeps two runners resident, so the measured peak is a
+        sum again and cannot be charged to either model. `/api/ps` still knows
+        which model is which, so that is what gets recorded."""
+        session = MeasuredSession(
+            FakeRuntime([(0.1, "", "hi")], SERVER, loaded=[loaded_entry]),
+            conn,
+            FakeSampler(
+                clean_window(
+                    peak_rss_bytes=9_000_000_000,
+                    peak_runner_rss_bytes=8_800_000_000,
+                    runner_count_max=2,
+                )
+            ),
+        )
+        await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        row = query(conn, "SELECT model_vram_bytes FROM requests")[0]
+        assert row["model_vram_bytes"] == loaded_entry.size_vram_bytes
+
+    @pytest.mark.asyncio
+    async def test_unattributable_memory_is_null_rather_than_zero(self, conn, model_ref):
+        """No runner seen and no `/api/ps` answer. "We could not attribute
+        this" and "this model used no memory" are different claims, and a 0
+        would average into the second one."""
+        session = MeasuredSession(
+            FakeRuntime([(0.1, "", "hi")], SERVER, loaded=None),
+            conn,
+            FakeSampler(clean_window(peak_runner_rss_bytes=0, runner_count_max=0)),
+        )
+        await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        row = query(conn, "SELECT model_vram_bytes FROM requests")[0]
+        assert row["model_vram_bytes"] is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_residency_still_falls_back_to_load_duration(
+        self, conn, model_ref
+    ):
+        """Attribution now shares the `/api/ps` call with cold detection, so a
+        runtime that cannot answer must not silently become "warm"."""
+        server = {**SERVER, "load_duration": 3_000_000_000}
+        session = MeasuredSession(
+            FakeRuntime([(0.1, "", "hi")], server, loaded=None),
+            conn,
+            FakeSampler(clean_window()),
+        )
+        result = await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        assert result.cold is True

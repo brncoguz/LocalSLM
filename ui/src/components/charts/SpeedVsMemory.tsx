@@ -11,9 +11,12 @@ import { ChartFrame, axisStyle, gridStyle, tooltipStyle } from "./ChartFrame";
  *  frontier once quality scores exist to plot on the Y axis instead. */
 export function SpeedVsMemory({ models }: { models: ModelSummary[] }) {
   const data = models
-    .filter((m) => m.decode_tps && m.peak_rss_bytes)
+    // Attributed memory, not the machine total: plotting the total put every
+    // model at roughly the same X, because most of it was whatever else
+    // happened to be resident.
+    .filter((m) => m.decode_tps && m.model_vram_bytes)
     .map((m) => ({
-      x: m.peak_rss_bytes!.max / 1e9,
+      x: m.model_vram_bytes!.max / 1e9,
       y: m.decode_tps!.p50,
       z: m.n,
       model: m.model,
@@ -22,17 +25,17 @@ export function SpeedVsMemory({ models }: { models: ModelSummary[] }) {
   return (
     <ChartFrame
       title="Speed vs memory"
-      hint="Median throughput against peak resident memory. Up and left is better — fast and small."
+      hint="Median throughput against the memory charged to each model. Up and left is better — fast and small."
       n={data.length}
       minN={2}
-      empty="Measure at least two models to compare them."
+      empty="Measure at least two models to compare them. Rows recorded before per-runner memory attribution don't carry a per-model figure."
     >
       <ResponsiveContainer width="100%" height={200}>
         <ScatterChart margin={{ top: 8, right: 12, bottom: 14, left: -18 }}>
           <CartesianGrid {...gridStyle} />
           <XAxis
             type="number" dataKey="x" {...axisStyle} unit=" GB"
-            label={{ value: "peak RAM", position: "insideBottom", offset: -8,
+            label={{ value: "model RAM", position: "insideBottom", offset: -8,
                      fill: "var(--color-faint)", fontSize: 10 }}
           />
           <YAxis type="number" dataKey="y" {...axisStyle} width={38} />

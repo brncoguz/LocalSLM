@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { api, type ModelDetail as Detail, type ModelSummary, type Point } from "@/lib/api";
-import { Badge, Stat } from "@/components/ui/primitives";
+import { Badge, PowerBadge, Stat } from "@/components/ui/primitives";
 import { Sparkline } from "@/components/charts/Sparkline";
 import { fmt, modelColor } from "@/lib/utils";
 
@@ -68,8 +68,26 @@ export function ModelDetail({ name, onClose }: { name: string; onClose: () => vo
                   sub={s.decode_tps ? `p95 ${s.decode_tps.p95.toFixed(1)}` : undefined} color={color} />
                 <Stat label="to answer" value={s.ttfat_ms ? fmt.ms(s.ttfat_ms.p50) : "—"}
                   sub={s.ttfat_ms ? `max ${fmt.ms(s.ttfat_ms.max)}` : undefined} />
-                <Stat label="peak RAM" value={s.peak_rss_bytes ? fmt.gb(s.peak_rss_bytes.max) : "—"} />
+                <Stat
+                  label="model RAM"
+                  value={s.model_vram_bytes ? fmt.gb(s.model_vram_bytes.max) : "—"}
+                  sub={s.peak_rss_bytes ? `machine ${fmt.gb(s.peak_rss_bytes.max)}` : undefined}
+                  hint={
+                    s.model_vram_bytes
+                      ? "Resident bytes charged to this model, excluding the Ollama supervisor and any other loaded model."
+                      : "Not attributed — these rows predate per-runner memory attribution. Re-measure to populate."
+                  }
+                />
               </div>
+
+              {s.power.mixed && (
+                <div className="flex items-center gap-2">
+                  <PowerBadge power={s.power} />
+                  <span className="text-[11px] text-faint">
+                    figures above average both sources
+                  </span>
+                </div>
+              )}
 
               {tps.length > 1 && (
                 <div>

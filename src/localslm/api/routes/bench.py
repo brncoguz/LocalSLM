@@ -25,6 +25,7 @@ from localslm.bench.stats import Interval, paired_bootstrap, rank_with_ties
 from localslm.bench.suites import Suite, TaskItem, available, load, save
 from localslm.db import new_id, query
 from localslm.db import write as db_write
+from localslm.host import power_state
 from localslm.inference.lock import LeaseBusy
 
 router = APIRouter(tags=["bench"])
@@ -143,6 +144,17 @@ async def suite_from_session(session_id: str, body: FromSessionRequest) -> dict:
     }
 
 
+def _power_label() -> str:
+    """Which power source the run is starting on.
+
+    Stamped on the cell rather than checked, because nothing here can plug in a
+    charger — the point is that a run measured on battery is never silently
+    compared against one on AC. A source change mid-run is caught downstream by
+    `power_split`, which works off the per-request `on_ac` column.
+    """
+    return "ac" if power_state().on_ac else "battery"
+
+
 @router.post("/bench/runs")
 async def start_run(body: RunRequest) -> dict:
     st = get_state()
@@ -175,6 +187,7 @@ async def start_run(body: RunRequest) -> dict:
         repeats=body.repeats,
         warmups=1,
         thinking_capable=capable,
+        power_source=_power_label(),
     )
     # Starting a run that will abort on its first unit wastes the user's time
     # and leaves a confusing 0/N row behind. Refuse while the machine is

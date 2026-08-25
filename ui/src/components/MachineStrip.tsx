@@ -24,7 +24,7 @@ export function MachineStrip({ health }: { health: Health | null }) {
       <span className={`flex items-center gap-1.5 tnum ${tone}`}>
         <MemoryStick size={12} />
         {fmt.gb(memory.free_bytes)} free
-        {memory.runner_rss_bytes ? ` · runner ${fmt.gb(memory.runner_rss_bytes)}` : ""}
+        {memory.runner_rss_bytes ? ` · runners ${fmt.gb(memory.runner_rss_bytes)}` : ""}
         {pressure !== "normal" && (
           <span className="flex items-center gap-1">
             <AlertTriangle size={11} />

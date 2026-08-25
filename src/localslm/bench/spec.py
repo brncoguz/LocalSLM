@@ -70,6 +70,11 @@ class BenchSpec:
     repeats: int = 3
     warmups: int = 1
     seed: int = 0
+    # Recorded, never set: nothing here can plug in a charger. When it is
+    # supplied the runner stamps it onto the cell so a run measured unplugged
+    # can never be silently compared against one that wasn't. Apple Silicon
+    # throttles ~12% on battery, which is wider than most model differences.
+    power_source: str | None = None
     # Models that can't think are still requested with think=None; the adapter
     # records "unsupported" rather than the runner branching on capability.
     thinking_capable: dict[str, bool] = field(default_factory=dict)
@@ -88,6 +93,8 @@ class BenchSpec:
                         axes.append(("think", think))
                     if len(self.temperatures) > 1:
                         axes.append(("temperature", temp))
+                    if self.power_source:
+                        axes.append(("power", self.power_source))
                     out.append(Cell(model=model, axes=tuple(axes)))
         # Dedupe: collapsing think levels above can produce repeats.
         seen, unique = set(), []
@@ -112,6 +119,7 @@ class BenchSpec:
                 "suites": {s.name: s.content_hash() for s in self.suites},
                 "think": [str(t) for t in self.think_levels],
                 "temperatures": self.temperatures,
+                "power_source": self.power_source,
                 "repeats": self.repeats,
             },
             sort_keys=True,

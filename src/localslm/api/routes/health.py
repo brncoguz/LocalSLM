@@ -46,7 +46,12 @@ async def health() -> dict:
         ],
         "memory": {
             "free_bytes": sample.free_bytes if sample else None,
-            "runner_rss_bytes": sample.ollama_rss_bytes if sample else None,
+            # Both, because they answer different questions: the total is what
+            # to weigh against the machine ceiling, the runner figure is what
+            # the loaded weights actually cost. The strip has always claimed to
+            # show the second one and until now was handed the first.
+            "ollama_rss_bytes": sample.ollama_rss_bytes if sample else None,
+            "runner_rss_bytes": sample.runner_rss_bytes if sample else None,
             "swap_used_bytes": sample.swap_used_bytes if sample else None,
             "pressure": sample.pressure if sample else "unknown",
         },

@@ -83,7 +83,10 @@ async def list_models() -> dict:
                    COUNT(*)            AS n,
                    AVG(decode_tps)     AS decode_tps,
                    AVG(ttfat_ms)       AS ttfat_ms,
-                   MAX(peak_rss_bytes) AS peak_rss_bytes
+                   MAX(peak_rss_bytes) AS peak_rss_bytes,
+                   MAX(model_vram_bytes) AS model_vram_bytes,
+                   MIN(on_ac)          AS on_ac_min,
+                   MAX(on_ac)          AS on_ac_max
             FROM requests
             WHERE ok = 1 AND excluded = 0 AND decode_tps IS NOT NULL
             GROUP BY model

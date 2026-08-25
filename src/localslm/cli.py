@@ -335,6 +335,7 @@ def bench(
                 repeats=repeats,
                 warmups=1,
                 thinking_capable=capable,
+                power_source="ac" if power_state().on_ac else "battery",
             )
             total = spec.total_requests()
             console.print(

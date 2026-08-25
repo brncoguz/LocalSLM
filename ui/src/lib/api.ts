@@ -13,7 +13,7 @@ export interface Health {
   config_hash: string;
   loaded: { name: string; size_bytes: number; size_vram_bytes: number; expires_at: string | null }[];
   memory: {
-    free_bytes: number | null; runner_rss_bytes: number | null;
+    free_bytes: number | null; ollama_rss_bytes: number | null; runner_rss_bytes: number | null;
     swap_used_bytes: number | null; pressure: "normal" | "warn" | "critical" | "unknown";
   };
   disk: { free_bytes: number };
@@ -25,6 +25,11 @@ export interface Health {
 
 export interface Headline {
   n: number; decode_tps: number | null; ttfat_ms: number | null; peak_rss_bytes: number | null;
+  // What this model can be charged for, as opposed to what the machine held.
+  model_vram_bytes: number | null;
+  // MIN/MAX of on_ac across the rows behind the figures above: unequal means
+  // the numbers mix a throttled source with an unthrottled one.
+  on_ac_min: number | null; on_ac_max: number | null;
 }
 
 export interface ModelCard {
@@ -92,8 +97,17 @@ export interface Point {
   ttft_ms: number | null; ttfat_ms: number | null; total_ms: number | null;
   prompt_tokens: number | null; output_tokens: number | null;
   thinking_tokens: number | null; answer_tokens: number | null;
-  peak_rss_bytes: number | null; srv_load_ms: number | null;
+  peak_rss_bytes: number | null; model_vram_bytes: number | null;
+  on_ac: number | null; srv_load_ms: number | null;
   itl_stddev_ms: number | null;
+}
+
+/** Per-power-source breakdown. `mixed` means the rollup above it spans both,
+ *  which on Apple Silicon is worth ~12% of throughput. */
+export interface PowerSplit {
+  mixed: boolean;
+  ac: { n: number; decode_tps: Spread | null; ttfat_ms: Spread | null };
+  battery: { n: number; decode_tps: Spread | null; ttfat_ms: Spread | null };
 }
 
 export interface ModelSummary {
@@ -101,6 +115,8 @@ export interface ModelSummary {
   decode_tps: Spread | null; prefill_tps: Spread | null;
   ttfat_ms: Spread | null; ttft_ms: Spread | null; total_ms: Spread | null;
   peak_rss_bytes: Spread | null;
+  model_vram_bytes: Spread | null;
+  power: PowerSplit;
   cold: { n: number; load_ms: Spread | null };
   warm: { n: number; load_ms: Spread | null };
   thinking: { thinking_tokens: number; answer_tokens: number; ratio: number | null };

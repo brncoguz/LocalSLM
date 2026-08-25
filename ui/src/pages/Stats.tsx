@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { api, type Point, type StatsSummary } from "@/lib/api";
-import { Button } from "@/components/ui/primitives";
+import { Button, PowerBadge } from "@/components/ui/primitives";
 import { TpsTimeline } from "@/components/charts/TpsTimeline";
 import { SpeedVsMemory } from "@/components/charts/SpeedVsMemory";
 import { ColdWarmBars } from "@/components/charts/ColdWarmBars";
@@ -116,7 +116,8 @@ function ModelTable({ summary }: { summary: StatsSummary }) {
       <div className="px-4 pt-4">
         <h3 className="text-sm font-semibold">All measurements</h3>
         <p className="mt-0.5 text-[11px] text-faint">
-          Medians. p95 in parentheses where it differs meaningfully.
+          Medians. p95 in parentheses where it differs meaningfully. A mixed-power
+          badge means that row averages battery and AC measurements together.
         </p>
       </div>
       <div className="overflow-x-auto p-4 pt-3">
@@ -127,7 +128,7 @@ function ModelTable({ summary }: { summary: StatsSummary }) {
               <th className="pb-2 text-right font-medium">n</th>
               <th className="pb-2 text-right font-medium">tok/s</th>
               <th className="pb-2 text-right font-medium">to answer</th>
-              <th className="pb-2 text-right font-medium">peak RAM</th>
+              <th className="pb-2 text-right font-medium">model RAM</th>
               <th className="pb-2 text-right font-medium">cold/warm</th>
               <th className="pb-2 text-right font-medium">thinking</th>
             </tr>
@@ -135,7 +136,12 @@ function ModelTable({ summary }: { summary: StatsSummary }) {
           <tbody>
             {summary.models.map((m) => (
               <tr key={m.model} className="border-t border-border">
-                <td className="py-1.5" style={{ color: modelColor(m.model) }}>{m.model}</td>
+                <td className="py-1.5" style={{ color: modelColor(m.model) }}>
+                  <span className="inline-flex items-center gap-1.5">
+                    {m.model}
+                    <PowerBadge power={m.power} />
+                  </span>
+                </td>
                 <td className="py-1.5 text-right text-faint">{m.n}</td>
                 <td className="py-1.5 text-right text-muted">
                   {m.decode_tps ? m.decode_tps.p50.toFixed(1) : "—"}
@@ -143,8 +149,15 @@ function ModelTable({ summary }: { summary: StatsSummary }) {
                 <td className="py-1.5 text-right text-muted">
                   {m.ttfat_ms ? fmt.ms(m.ttfat_ms.p50) : "—"}
                 </td>
-                <td className="py-1.5 text-right text-muted">
-                  {m.peak_rss_bytes ? fmt.gb(m.peak_rss_bytes.max) : "—"}
+                <td
+                  className="py-1.5 text-right text-muted"
+                  title={
+                    m.model_vram_bytes
+                      ? `machine total ${m.peak_rss_bytes ? fmt.gb(m.peak_rss_bytes.max) : "—"}`
+                      : "Not attributed — recorded before per-runner memory attribution."
+                  }
+                >
+                  {m.model_vram_bytes ? fmt.gb(m.model_vram_bytes.max) : "—"}
                 </td>
                 <td className="py-1.5 text-right text-faint">
                   {m.cold.n}/{m.warm.n}
