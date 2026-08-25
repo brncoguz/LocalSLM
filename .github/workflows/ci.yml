@@ -1,0 +1,72 @@
+name: CI
+
+# Deliberately does not run benchmarks. GitHub runners are shared and
+# virtualised, and this project measures one specific machine — numbers from a
+# runner would be noise, and publishing noise as measurement is exactly what
+# LocalSLM argues against. CI verifies the code; the numbers come from hardware
+# you can name.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches ruff.toml's target-version and the Makefile's venv.
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Test
+        # The offline suite fakes the runtime, so it needs no Ollama and no
+        # network. Pointing at a dead host makes an accidental live call fail
+        # loudly here rather than passing silently on a developer's machine.
+        env:
+          PYTHONPATH: src
+          LOCALSLM_OLLAMA_HOST: http://127.0.0.1:9
+        run: pytest -q -m "not integration"
+
+  ui:
+    name: Typecheck and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Typecheck and build
+        working-directory: ui
+        # `npm run build` runs `tsc -b` first, so this covers both.
+        run: npm run build

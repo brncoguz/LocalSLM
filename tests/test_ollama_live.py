@@ -2,6 +2,13 @@
 
 Deselected by default so a clean checkout can run the suite with no models
 downloaded and no server running.
+
+**Correctness only.** These also run nightly on a GitHub macOS runner, where
+they verify that the adapter still speaks Ollama properly — streaming, /api/ps,
+capability detection, the thinking/answer split. They deliberately assert
+nothing about speed: a shared virtualised runner measures its neighbours, not
+the model, and a timing assertion here would either flake or quietly legitimise
+numbers this project would refuse to publish.
 """
 
 from __future__ import annotations

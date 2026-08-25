@@ -4,7 +4,7 @@ LocalSLM is a benchmarking lab for small language models running locally through
 
 Everything here was built and measured on a MacBook Pro M1 Pro with 16 GB of unified memory.
 
-![Python](https://img.shields.io/badge/Python-3.13-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![React](https://img.shields.io/badge/React-19-61dafb) ![Ollama](https://img.shields.io/badge/Ollama-0.32-white)
+[![CI](https://github.com/brncoguz/LocalSLM/actions/workflows/ci.yml/badge.svg)](https://github.com/brncoguz/LocalSLM/actions/workflows/ci.yml) ![Python](https://img.shields.io/badge/Python-3.13-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green) ![React](https://img.shields.io/badge/React-19-61dafb) ![Ollama](https://img.shields.io/badge/Ollama-0.32-white) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 ---
 
