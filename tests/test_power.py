@@ -14,7 +14,8 @@ from localslm.api.routes.stats import power_split
 
 
 def rows(*specs):
-    """(on_ac, decode_tps) pairs as the aggregation layer sees them."""
+    """(on_ac, decode_tps) pairs as the aggregation layer sees them.
+    `on_ac` of None is a row whose power source could not be read."""
     return [{"on_ac": on_ac, "decode_tps": tps, "ttfat_ms": 300.0} for on_ac, tps in specs]
 
 
@@ -52,3 +53,23 @@ def test_empty_input_describes_nothing_rather_than_claiming_agreement():
     assert split["mixed"] is False
     assert split["ac"]["decode_tps"] is None
     assert split["battery"]["decode_tps"] is None
+
+
+def test_rows_with_an_unreadable_power_source_are_counted_not_dropped():
+    """`pmset` failing writes a NULL `on_ac`. Such a row belongs to neither
+    bucket, and if it simply vanished the two sides would silently stop adding
+    up to the rollup printed above them."""
+    split = power_split(rows((1, 83.7), (0, 74.8), (None, 80.0), (None, 79.0)))
+
+    assert split["ac"]["n"] == 1
+    assert split["battery"]["n"] == 1
+    assert split["unknown"] == 2
+
+
+def test_unknown_rows_alone_are_not_a_mix():
+    """Nothing is being averaged across sources here — there is just nothing
+    known. Badging it as mixed would point at the wrong problem."""
+    split = power_split(rows((None, 80.0), (None, 79.0)))
+
+    assert split["mixed"] is False
+    assert split["unknown"] == 2

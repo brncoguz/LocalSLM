@@ -35,22 +35,45 @@ _SWAP_RE = re.compile(r"used\s*=\s*([\d.]+)([KMG])", re.IGNORECASE)
 _UNIT = {"K": 1024, "M": 1024**2, "G": 1024**3}
 
 
-def _vm_stat() -> tuple[int, int]:
-    """Return (swap_used_bytes, free_pct).
+def _parse_swap_used(text: str) -> int | None:
+    """Swap bytes from `sysctl -n vm.swapusage`, or None if it can't be read.
 
-    Swap comes from sysctl rather than psutil because psutil's macOS swap
-    numbers don't account for compressed memory, which is most of what macOS
-    actually does under pressure.
+    None rather than 0 is the whole point. A row is excluded from every average
+    when swap grew during it, so a parser that answered 0 to unreadable output
+    would not fail loudly — it would silently switch the exclusion rule off and
+    let measurements taken during thrashing be published as merely slow.
     """
-    swap_used = 0
+    if m := _SWAP_RE.search(text or ""):
+        try:
+            return int(float(m.group(1)) * _UNIT[m.group(2).upper()])
+        except (ValueError, KeyError):
+            return None
+    return None
+
+
+def _vm_stat() -> tuple[int | None, float]:
+    """Return (swap_used_bytes | None, free_pct).
+
+    Swap comes from sysctl rather than psutil because psutil's macOS numbers
+    don't account for compressed memory, which is most of what macOS actually
+    does under pressure. psutil is kept as a fallback anyway: it undercounts
+    here, but an undercount is still evidence, and the alternative is throwing
+    away every measurement on a machine whose `sysctl` output we can't read.
+    """
     try:
         out = subprocess.run(
             ["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=2
         ).stdout
-        if m := _SWAP_RE.search(out):
-            swap_used = int(float(m.group(1)) * _UNIT[m.group(2).upper()])
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+
+    swap_used = _parse_swap_used(out)
+    if swap_used is None:
+        try:
+            swap_used = psutil.swap_memory().used
+        except Exception:
+            swap_used = None
+
     vm = psutil.virtual_memory()
     return swap_used, vm.available / vm.total * 100
 
@@ -64,6 +87,17 @@ def _pressure_from_free(free_pct: float) -> Pressure:
     if free_pct < 20:
         return "warn"
     return "normal"
+
+
+def _bracketing(ring: list[SystemSample], t0: float, t1: float) -> list[SystemSample]:
+    """The samples immediately either side of a range that contains none.
+
+    Used for requests shorter than the sample interval. Returns at most two
+    samples, in time order, or an empty list when the ring holds nothing.
+    """
+    before = [s for s in ring if s.t_mono < t0]
+    after = [s for s in ring if s.t_mono > t1]
+    return [s for s in (before[-1] if before else None, after[0] if after else None) if s]
 
 
 def _is_supervisor(name: str, exe: str, cmdline: list[str]) -> bool:
@@ -90,7 +124,8 @@ class SystemSample:
     runner_rss_bytes: int
     runner_count: int
     free_bytes: int
-    swap_used_bytes: int
+    # None when neither sysctl nor psutil could say. Distinct from 0.
+    swap_used_bytes: int | None
     pressure: Pressure
     cpu_pct: float
 
@@ -103,7 +138,9 @@ class SampleWindow:
     duration_s: float
     peak_rss_bytes: int
     mean_rss_bytes: float
-    swap_delta_bytes: int
+    # None when swap could not be read across this window — "we don't know",
+    # which `_persist` treats as a reason to exclude rather than as "clean".
+    swap_delta_bytes: int | None
     pressure_max: Pressure
     # Runner processes only, so this can be charged to a model — but only when
     # `runner_count_max` is 1. With several runners up the peak is a sum again
@@ -119,8 +156,17 @@ class SampleWindow:
     @property
     def swapped(self) -> bool:
         """A cell that swapped is not comparable to one that didn't, and is
-        badged rather than quietly averaged in."""
-        return self.swap_delta_bytes > 0
+        badged rather than quietly averaged in.
+
+        False when swap is unknown — that case is handled separately, because
+        "did not swap" and "we could not tell" must not collapse into the same
+        answer here.
+        """
+        return self.swap_delta_bytes is not None and self.swap_delta_bytes > 0
+
+    @property
+    def swap_known(self) -> bool:
+        return self.swap_delta_bytes is not None
 
 
 class SystemSampler:
@@ -236,26 +282,43 @@ class SystemSampler:
         self._abort_latched = False
 
     def window(self, t0: float, t1: float) -> SampleWindow:
-        with self._lock:
-            rows = [s for s in self._ring if t0 <= s.t_mono <= t1]
         duration = max(t1 - t0, 0.0)
-        if not rows:
-            return SampleWindow(0, duration, 0, 0.0, 0, "normal")
-        rss = [s.ollama_rss_bytes for s in rows]
-        runner_rss = [s.runner_rss_bytes for s in rows]
-        swaps = [s.swap_used_bytes for s in rows]
+        with self._lock:
+            ring = list(self._ring)
+        rows = [s for s in ring if t0 <= s.t_mono <= t1]
+
+        # A request faster than the sample interval can finish between two
+        # ticks and enclose no sample at all — the 1B model answers in 0.2 s at
+        # a 0.25 s interval. Falling back to the samples either side keeps the
+        # machine-state evidence rather than reporting "nothing happened", which
+        # would have quietly exempted the fastest requests from the swap rule.
+        bracket = rows or _bracketing(ring, t0, t1)
+        if not bracket:
+            # No evidence at all: the sampler was not running. Unknown swap
+            # rather than zero, so `_persist` excludes instead of publishing a
+            # measurement taken in unobserved conditions.
+            return SampleWindow(0, duration, 0, 0.0, None, "normal")
+
+        rss = [s.ollama_rss_bytes for s in bracket]
+        runner_rss = [s.runner_rss_bytes for s in bracket]
+        swaps = [s.swap_used_bytes for s in bracket]
         order: dict[str, int] = {"normal": 0, "warn": 1, "critical": 2}
-        worst = max(rows, key=lambda s: order[s.pressure]).pressure
+        worst = max(bracket, key=lambda s: order[s.pressure]).pressure
+        # One unreadable sample poisons the delta: the difference between two
+        # endpoints is meaningless if either is a guess.
+        delta = (
+            None if swaps[0] is None or swaps[-1] is None else max(0, swaps[-1] - swaps[0])
+        )
         return SampleWindow(
             n=len(rows),
             duration_s=duration,
             peak_rss_bytes=max(rss),
             mean_rss_bytes=sum(rss) / len(rss),
-            swap_delta_bytes=max(0, swaps[-1] - swaps[0]),
+            swap_delta_bytes=delta,
             pressure_max=worst,
             energy_j=None,
             peak_runner_rss_bytes=max(runner_rss),
-            runner_count_max=max(s.runner_count for s in rows),
+            runner_count_max=max(s.runner_count for s in bracket),
         )
 
     def series(self, t0: float, t1: float, hz: float = 1.0) -> list[SystemSample]:

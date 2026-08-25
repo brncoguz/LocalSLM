@@ -167,12 +167,20 @@ class MeasuredSession:
 
         # A window that swapped is not comparable to one that didn't. Mark it
         # here rather than letting it average in downstream looking merely slow.
+        #
+        # Not knowing counts against the row too. If swap could not be read at
+        # all, this measurement was taken in unobserved conditions, and
+        # publishing it would mean the exclusion rule had silently stopped
+        # applying rather than visibly failed.
         excluded = prov.excluded
         reason = prov.exclude_reason
-        if window.swapped and not excluded:
-            excluded, reason = True, "swapped"
-        elif window.pressure_max == "critical" and not excluded:
-            excluded, reason = True, "memory_pressure"
+        if not excluded:
+            if window.swapped:
+                excluded, reason = True, "swapped"
+            elif not window.swap_known:
+                excluded, reason = True, "swap_unknown"
+            elif window.pressure_max == "critical":
+                excluded, reason = True, "memory_pressure"
 
         row: dict[str, Any] = {
             "id": new_id(),
@@ -228,7 +236,7 @@ class MeasuredSession:
             "swap_delta_bytes": window.swap_delta_bytes,
             "mem_pressure": window.pressure_max,
             "energy_j": window.energy_j,
-            "on_ac": int(power.on_ac),
+            "on_ac": None if power.on_ac is None else int(power.on_ac),
             "ok": int(result.error is None),
             "error": result.error,
             "finish_reason": result.finish_reason,

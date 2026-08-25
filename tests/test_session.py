@@ -274,6 +274,57 @@ class TestCrossProcessLease:
         await api.release_shared()
 
 
+class TestExclusionCannotBeSilentlyDisabled:
+    """Every input to the exclusion rule comes from parsing external command
+    output. When that parsing fails, the failure must count against the row —
+    a rule that degrades to "include it" stops protecting anything without
+    ever looking broken."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_swap_is_excluded_rather_than_assumed_clean(
+        self, conn, model_ref
+    ):
+        """`swap_delta_bytes = None` means the machine was not observed. That is
+        not the same as observing no swapping, and only one of the two is
+        safe to publish."""
+        session = make([(0.1, "", "hi")], window=clean_window(swap_delta_bytes=None))
+        session.conn = conn
+        await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        row = query(conn, "SELECT excluded, exclude_reason FROM requests")[0]
+        assert row["excluded"] == 1
+        assert row["exclude_reason"] == "swap_unknown"
+
+    @pytest.mark.asyncio
+    async def test_zero_swap_is_still_a_clean_measurement(self, conn, model_ref):
+        """The counterpart, so the rule above cannot be satisfied by excluding
+        everything."""
+        session = make([(0.1, "", "hi")], window=clean_window(swap_delta_bytes=0))
+        session.conn = conn
+        await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        row = query(conn, "SELECT excluded FROM requests")[0]
+        assert row["excluded"] == 0
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_power_source_is_recorded_as_unknown(
+        self, conn, model_ref, monkeypatch
+    ):
+        """`on_ac` must be NULL rather than 1, so `power_split` counts the row
+        as unaccounted for instead of averaging it into the AC bucket."""
+        import localslm.inference.session as session_mod
+        from localslm.host import PowerState
+
+        monkeypatch.setattr(
+            session_mod, "power_state", lambda: PowerState(on_ac=None, battery_pct=None)
+        )
+        session = make([(0.1, "", "hi")], window=clean_window())
+        session.conn = conn
+        await session.generate(request(model_ref), Provenance(kind="chat"))
+
+        assert query(conn, "SELECT on_ac FROM requests")[0]["on_ac"] is None
+
+
 class TestMemoryAttribution:
     """Peak RAM used to sum every Ollama process, so a 1B model read 5.2 GB —
     the supervisor plus whatever else happened to be resident. These pin down

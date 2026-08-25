@@ -38,9 +38,23 @@ export function MachineStrip({ health }: { health: Health | null }) {
         {fmt.gb(disk.free_bytes)} free
       </span>
 
-      <span className={`flex items-center gap-1.5 tnum ${power.on_ac ? "" : "text-warn"}`}>
-        {power.on_ac ? <Plug size={12} /> : <BatteryMedium size={12} />}
-        {power.on_ac ? "AC" : `battery ${power.battery_pct ?? "?"}%`}
+      {/* Three states, not two: an unreadable `pmset` must not render as
+          "battery", or every measurement taken on an unknown source would be
+          silently attributed to the throttled one. */}
+      <span
+        className={`flex items-center gap-1.5 tnum ${power.on_ac === true ? "" : "text-warn"}`}
+        title={
+          power.on_ac === null
+            ? "Power source could not be read — these measurements are recorded as unknown."
+            : undefined
+        }
+      >
+        {power.on_ac === true ? <Plug size={12} /> : <BatteryMedium size={12} />}
+        {power.on_ac === true
+          ? "AC"
+          : power.on_ac === false
+            ? `battery ${power.battery_pct ?? "?"}%`
+            : "power unknown"}
       </span>
 
       <span className="ml-auto flex items-center gap-3 shrink-0">

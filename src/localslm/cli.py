@@ -16,7 +16,7 @@ from rich.table import Table
 
 from localslm.config import load_config
 from localslm.db import connect, query, write
-from localslm.host import disk_free_bytes, host_info, power_state
+from localslm.host import disk_free_bytes, host_info, power_label, power_state
 from localslm.runtimes.base import COLD_LOAD_MS_FALLBACK
 from localslm.runtimes.ollama import OllamaRuntime
 from localslm.telemetry.sampler import SystemSampler
@@ -73,7 +73,7 @@ def doctor() -> None:
             t.add_row("ollama rss", f"{sample.ollama_rss_bytes / 1e9:.2f} GB")
         t.add_row(
             "power",
-            f"{ok(power.on_ac)} {'AC' if power.on_ac else 'battery'}"
+            f"{ok(bool(power.on_ac))} {power_label(power)}"
             + (f" · {power.battery_pct}%" if power.battery_pct is not None else "")
             + ("" if power.on_ac else "  [yellow]battery throttles Apple Silicon[/yellow]"),
         )
@@ -199,13 +199,111 @@ def export_demo(
     )
 
 
+def _stale_cells(conn) -> list[tuple]:
+    """Frozen cell aggregates that disagree with the rows they summarise.
+
+    Runs benchmarked before the freeze respected `requests.excluded` counted
+    swapped measurements into their score, while every endpoint reading the
+    same run excluded them. The `results` rows are still there, so the correct
+    aggregate can be recomputed rather than guessed.
+    """
+    from localslm.bench.stats import bootstrap_ci
+
+    stale = []
+    for cell in query(
+        conn, "SELECT run_id, cell_key, model, n, n_excluded, score_mean FROM cells"
+    ):
+        graded = query(
+            conn,
+            """SELECT res.score, res.passed, req.excluded
+               FROM results res JOIN requests req ON req.id = res.request_id
+               WHERE res.run_id = ? AND res.cell_key = ?""",
+            (cell["run_id"], cell["cell_key"]),
+        )
+        kept = [g for g in graded if not g["excluded"]]
+        n_excluded = len(graded) - len(kept)
+        if cell["n"] == len(kept) and (cell["n_excluded"] or 0) == n_excluded:
+            continue
+        scores = [g["score"] or 0.0 for g in kept]
+        ci = bootstrap_ci(scores) if scores else None
+        stale.append(
+            (
+                cell,
+                {
+                    "n": len(kept),
+                    "n_excluded": n_excluded,
+                    "n_failed": sum(1 for g in kept if not g["passed"]),
+                    "score_mean": ci.mean if ci else None,
+                    "score_ci_lo": ci.lo if ci else None,
+                    "score_ci_hi": ci.hi if ci else None,
+                    "pass_rate": (
+                        sum(1 for g in kept if g["passed"]) / len(kept) if kept else None
+                    ),
+                },
+            )
+        )
+    return stale
+
+
+def _repair_cells(conn, apply: bool) -> None:
+    stale = _stale_cells(conn)
+    if not stale:
+        console.print("  [green]Frozen cell aggregates agree with their rows.[/green]")
+        return
+
+    t = Table(
+        title=f"{len(stale)} frozen aggregates include excluded measurements",
+        title_justify="left",
+    )
+    t.add_column("model")
+    t.add_column("n", justify="right")
+    t.add_column("score", justify="right")
+    for cell, fixed in stale:
+        old_score = "—" if cell["score_mean"] is None else f"{cell['score_mean']:.3f}"
+        new_score = "—" if fixed["score_mean"] is None else f"{fixed['score_mean']:.3f}"
+        t.add_row(
+            cell["model"],
+            f"{cell['n']} → [bold]{fixed['n']}[/bold]",
+            f"{old_score} → [bold]{new_score}[/bold]",
+        )
+    console.print()
+    console.print(t)
+
+    if not apply:
+        return
+
+    with write(conn):
+        for cell, fixed in stale:
+            conn.execute(
+                "UPDATE cells SET n = ?, n_excluded = ?, n_failed = ?, score_mean = ?, "
+                "score_ci_lo = ?, score_ci_hi = ?, pass_rate = ? "
+                "WHERE run_id = ? AND cell_key = ?",
+                (
+                    fixed["n"],
+                    fixed["n_excluded"],
+                    fixed["n_failed"],
+                    fixed["score_mean"],
+                    fixed["score_ci_lo"],
+                    fixed["score_ci_hi"],
+                    fixed["pass_rate"],
+                    cell["run_id"],
+                    cell["cell_key"],
+                ),
+            )
+    console.print(f"  [green]Refroze {len(stale)} cell aggregates.[/green]")
+
+
 @app.command()
 def repair(
     apply: bool = typer.Option(
         False, "--apply", help="Write the changes (default: dry run)"
     ),
 ) -> None:
-    """Recompute the cold flag on rows recorded before residency checking.
+    """Re-score history when a metric definition changes.
+
+    Two repairs, both dry-run by default:
+
+    Cold flag on rows recorded before residency checking.
 
     Early rows used a 100 ms load-duration threshold. Ollama reports ~150-300 ms
     of handle setup even when weights are resident, so those rows are all
@@ -232,7 +330,9 @@ def repair(
     ]
 
     if not changes:
-        console.print("\n  [green]Nothing to repair.[/green]\n")
+        console.print("\n  [green]Cold flags agree with the current rule.[/green]")
+        _repair_cells(conn, apply)
+        console.print()
         return
 
     t = Table(
@@ -247,6 +347,8 @@ def repair(
     console.print(t)
     if len(changes) > 25:
         console.print(f"  [dim]…and {len(changes) - 25} more[/dim]")
+
+    _repair_cells(conn, apply)
 
     if not apply:
         console.print("\n  [yellow]Dry run.[/yellow] Re-run with --apply to write.\n")
@@ -335,7 +437,7 @@ def bench(
                 repeats=repeats,
                 warmups=1,
                 thinking_capable=capable,
-                power_source="ac" if power_state().on_ac else "battery",
+                power_source=power_label(),
             )
             total = spec.total_requests()
             console.print(

@@ -6,7 +6,7 @@
    "runs": 8
   },
   "disk": {
-   "free_bytes": 177778503680
+   "free_bytes": 178516385792
   },
   "host": {
    "chip": "Apple M1 Pro",
@@ -28,18 +28,18 @@
   },
   "loaded": [
    {
-    "expires_at": "2026-08-25T10:09:05.987296+02:00",
+    "expires_at": "2026-08-25T10:28:45.320383+02:00",
     "name": "qwen3.5:4b",
     "size_bytes": 3144910109,
     "size_vram_bytes": 3144910109
    }
   ],
   "memory": {
-   "free_bytes": 2698166272,
-   "ollama_rss_bytes": 3644178432,
+   "free_bytes": 2495496192,
+   "ollama_rss_bytes": 186187776,
    "pressure": "warn",
-   "runner_rss_bytes": 3628662784,
-   "swap_used_bytes": 8455066746
+   "runner_rss_bytes": 137084928,
+   "swap_used_bytes": 8710457917
   },
   "ok": true,
   "power": {
@@ -111,7 +111,7 @@
    }
   ],
   "disk": {
-   "free_bytes": 177778503680
+   "free_bytes": 178516385792
   },
   "installed": [
    {
@@ -179,7 +179,7 @@
    },
    {
     "digest": "2a654d98e6fb",
-    "expires_at": "2026-08-25T10:09:05.987296+02:00",
+    "expires_at": "2026-08-25T10:28:45.320383+02:00",
     "family": "qwen35",
     "headline": {
      "decode_tps": 44.34855758964786,
@@ -1962,7 +1962,8 @@
       "p95": 636.2177080009133
      }
     },
-    "mixed": true
+    "mixed": true,
+    "unknown": 0
    },
    "prefill_tps": {
     "max": 1422.8723404255318,
@@ -4239,7 +4240,8 @@
       "p95": 220.6863749306649
      }
     },
-    "mixed": true
+    "mixed": true,
+    "unknown": 0
    },
    "prefill_tps": {
     "max": 9181.51141803343,
@@ -6788,7 +6790,8 @@
      "n": 0,
      "ttfat_ms": null
     },
-    "mixed": false
+    "mixed": false,
+    "unknown": 0
    },
    "prefill_tps": {
     "max": 2599.534820084827,
@@ -9011,7 +9014,8 @@
      "n": 0,
      "ttfat_ms": null
     },
-    "mixed": false
+    "mixed": false,
+    "unknown": 0
    },
    "prefill_tps": {
     "max": 711.3968408710659,
@@ -9310,7 +9314,8 @@
       "p95": 533.4880000445992
      }
     },
-    "mixed": true
+    "mixed": true,
+    "unknown": 0
    },
    "prefill_tps": {
     "max": 353.1040634843937,
@@ -13549,7 +13554,8 @@
       "n": 0,
       "ttfat_ms": null
      },
-     "mixed": false
+     "mixed": false,
+     "unknown": 0
     },
     "prefill_tps": {
      "max": 631.4643440391943,
@@ -13679,7 +13685,8 @@
        "p95": 636.2177080009133
       }
      },
-     "mixed": true
+     "mixed": true,
+     "unknown": 0
     },
     "prefill_tps": {
      "max": 1422.8723404255318,
@@ -13809,7 +13816,8 @@
        "p95": 220.6863749306649
       }
      },
-     "mixed": true
+     "mixed": true,
+     "unknown": 0
     },
     "prefill_tps": {
      "max": 9181.51141803343,
@@ -13939,7 +13947,8 @@
        "p95": 388.09041609056294
       }
      },
-     "mixed": true
+     "mixed": true,
+     "unknown": 0
     },
     "prefill_tps": {
      "max": 5189.620758483034,
@@ -14055,7 +14064,8 @@
       "n": 0,
       "ttfat_ms": null
      },
-     "mixed": false
+     "mixed": false,
+     "unknown": 0
     },
     "prefill_tps": {
      "max": 711.3968408710659,
@@ -14171,7 +14181,8 @@
        "p95": 533.4880000445992
       }
      },
-     "mixed": true
+     "mixed": true,
+     "unknown": 0
     },
     "prefill_tps": {
      "max": 353.1040634843937,

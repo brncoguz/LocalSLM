@@ -34,9 +34,10 @@ class FakeRuntime:
 
     name = "fake"
 
-    def __init__(self, script, server: dict | None = None, loaded=None):
+    def __init__(self, script, server: dict | None = None, loaded=None, installed=()):
         self.script = script
         self.server = server or {}
+        self.installed = list(installed)
         # None means "this runtime cannot answer", which the session must keep
         # distinct from "nothing is loaded" — the first falls back to the
         # load-duration rule, the second is a definitive cold.
@@ -46,6 +47,9 @@ class FakeRuntime:
         if self._loaded is None:
             raise RuntimeError("runtime cannot say what is loaded")
         return self._loaded
+
+    async def list_models(self):
+        return self.installed
 
     async def stream(self, req) -> AsyncIterator[Chunk]:
         base = time.perf_counter()
@@ -82,3 +86,44 @@ def loaded_entry():
     return LoadedModel(
         name="test:4b", size_bytes=3_400_000_000, size_vram_bytes=3_400_000_000
     )
+
+
+@pytest.fixture
+def client(conn, monkeypatch):
+    """The real FastAPI app, wired to a temporary database.
+
+    Deliberately constructed without `with TestClient(app)`: entering the
+    context manager runs the lifespan, which calls `init_state()` and would
+    open the developer's actual `data/localslm.db` and start a live sampler
+    thread. Routes reach for the module-global `_state` directly rather than
+    through `Depends`, so it is replaced here instead of overridden.
+    """
+    from fastapi.testclient import TestClient
+
+    import localslm.api.deps as deps
+    from localslm.api.deps import AppState
+    from localslm.api.main import app
+    from localslm.config import load_config
+    from localslm.host import HostInfo
+    from localslm.inference.lock import InferenceLease
+
+    host = HostInfo(
+        chip="test",
+        cores=1,
+        ram_bytes=16 * 1024**3,
+        macos="test",
+        python="3.13",
+        ollama_version=None,
+        localslm_version="test",
+    )
+    state = AppState(
+        cfg=load_config(),
+        conn=conn,
+        runtime=FakeRuntime([], loaded=[]),
+        sampler=FakeSampler(None),
+        lease=InferenceLease(),
+        host=host,
+        env_hash="test",
+    )
+    monkeypatch.setattr(deps, "_state", state, raising=False)
+    return TestClient(app)

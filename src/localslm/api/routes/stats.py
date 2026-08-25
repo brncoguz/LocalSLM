@@ -72,8 +72,13 @@ def power_split(rows: list[Row]) -> dict[str, Any]:
     """
     ac = [r for r in rows if r["on_ac"] == 1]
     battery = [r for r in rows if r["on_ac"] == 0]
+    # Rows whose power source could not be read belong to neither bucket. They
+    # are counted rather than dropped, so the two sides always add up to the
+    # rollup above them and a reader can see what is unaccounted for.
+    unknown = len(rows) - len(ac) - len(battery)
     return {
         "mixed": bool(ac and battery),
+        "unknown": unknown,
         "ac": {
             "n": len(ac),
             "decode_tps": _spread([r["decode_tps"] for r in ac]),

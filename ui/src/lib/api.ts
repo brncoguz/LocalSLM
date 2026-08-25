@@ -17,7 +17,8 @@ export interface Health {
     swap_used_bytes: number | null; pressure: "normal" | "warn" | "critical" | "unknown";
   };
   disk: { free_bytes: number };
-  power: { on_ac: boolean; battery_pct: number | null };
+  // null when `pmset` could not be read — distinct from being on battery.
+  power: { on_ac: boolean | null; battery_pct: number | null };
   db: { requests: number; runs: number };
   lease: { busy: boolean; holder: string | null; exclusive: boolean; run_id: string | null };
   presets: string[];
@@ -98,6 +99,7 @@ export interface Point {
   prompt_tokens: number | null; output_tokens: number | null;
   thinking_tokens: number | null; answer_tokens: number | null;
   peak_rss_bytes: number | null; model_vram_bytes: number | null;
+  /** 1 = AC, 0 = battery, null = unreadable. */
   on_ac: number | null; srv_load_ms: number | null;
   itl_stddev_ms: number | null;
 }
@@ -106,6 +108,9 @@ export interface Point {
  *  which on Apple Silicon is worth ~12% of throughput. */
 export interface PowerSplit {
   mixed: boolean;
+  /** Rows whose power source could not be read: in neither bucket, but counted
+   *  so the two sides still add up to the rollup above them. */
+  unknown: number;
   ac: { n: number; decode_tps: Spread | null; ttfat_ms: Spread | null };
   battery: { n: number; decode_tps: Spread | null; ttfat_ms: Spread | null };
 }

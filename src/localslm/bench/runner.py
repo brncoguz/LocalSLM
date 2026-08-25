@@ -264,6 +264,13 @@ class BenchRunner:
     def _record(
         self, unit: Unit, grade: Any, request_id: str | None, result: GenResult
     ) -> None:
+        # Whether the measurement survived is decided in `_persist`, after this
+        # unit has already been generated and graded — a window that swapped or
+        # hit critical pressure gets flagged there. Read it back off the row
+        # rather than tracking it in memory, so `results`, `cells` and every
+        # endpoint are all applying one stored fact instead of three copies of
+        # it that can drift apart.
+        excluded = self._was_excluded(request_id)
         insert(
             self.state.conn,
             "results",
@@ -279,7 +286,7 @@ class BenchRunner:
                 "lang": unit.item.lang,
                 "difficulty": unit.item.difficulty,
                 "rep": max(unit.rep, 0),
-                "excluded": 0,
+                "excluded": int(excluded),
                 "grader": unit.item.task,
                 "judged": int(grade.judged),
                 "score": grade.score,
@@ -290,7 +297,20 @@ class BenchRunner:
                 "detail_json": json.dumps(grade.detail, default=str)[:20000],
             },
         )
-        self._graded.setdefault(unit.cell.key, []).append((unit, grade))
+        self._graded.setdefault(unit.cell.key, []).append((unit, grade, excluded))
+
+    def _was_excluded(self, request_id: str | None) -> bool:
+        """Did the measurement behind this grade survive?
+
+        A missing row is treated as excluded: it means the request was never
+        persisted, so there is no evidence the machine was in a fit state.
+        """
+        if not request_id:
+            return True
+        row = self.state.conn.execute(
+            "SELECT excluded FROM requests WHERE id = ?", (request_id,)
+        ).fetchone()
+        return True if row is None else bool(row["excluded"])
 
     def _finalise(
         self, started: float, done: int, planned: int, aborted: str | None
@@ -300,15 +320,61 @@ class BenchRunner:
         summaries = []
 
         for cell_key, entries in self._graded.items():
-            units = [u for u, _ in entries]
-            grades = [g for _, g in entries]
-            cell = units[0].cell
+            cell = entries[0][0].cell
+            # The frozen aggregate has to describe the same rows the charts and
+            # the analysis endpoints will, and those all join `excluded = 0`.
+            # Freezing over everything graded instead would publish a
+            # leaderboard number that cannot be reproduced in the inspector —
+            # and would do it worst on the long reasoning runs that swap most,
+            # which is where the project's headline claims come from.
+            kept = [(u, g) for u, g, excluded in entries if not excluded]
+            n_excluded = len(entries) - len(kept)
+
+            if not kept:
+                # Every measurement in this cell was thrown out. The cell is
+                # still recorded, because "attempted and produced nothing
+                # usable" is a result — dropping the row would make it look
+                # like the cell was never run, and a 0.0 would read as the
+                # model scoring zero.
+                insert(
+                    conn,
+                    "cells",
+                    {
+                        "run_id": self.run_id,
+                        "cell_key": cell_key,
+                        "model": cell.model,
+                        "axes_json": json.dumps(cell.axes_dict),
+                        "n": 0,
+                        "n_excluded": n_excluded,
+                        "n_failed": 0,
+                        "metrics_json": "{}",
+                    },
+                )
+                summaries.append(
+                    {
+                        "cell_key": cell_key,
+                        "label": cell.label(),
+                        "model": cell.model,
+                        "axes": cell.axes_dict,
+                        "n": 0,
+                        "n_excluded": n_excluded,
+                        "score": None,
+                        "ci_lo": None,
+                        "ci_hi": None,
+                        "pass_rate": None,
+                        "tasks": {},
+                    }
+                )
+                continue
+
+            units = [u for u, _ in kept]
+            grades = [g for _, g in kept]
             scores = [g.score for g in grades]
             ci = bootstrap_ci(scores)
 
             per_task: dict[str, dict[str, float]] = {}
             for task in {u.item.task for u in units}:
-                pairs = [(u, g) for u, g in entries if u.item.task == task]
+                pairs = [(u, g) for u, g in kept if u.item.task == task]
                 per_task[task] = get_grader(task).aggregate(
                     [g for _, g in pairs], [u.item for u, _ in pairs]
                 )
@@ -319,7 +385,7 @@ class BenchRunner:
                 "model": cell.model,
                 "axes_json": json.dumps(cell.axes_dict),
                 "n": len(grades),
-                "n_excluded": 0,
+                "n_excluded": n_excluded,
                 "n_failed": sum(1 for g in grades if not g.passed),
                 "score_mean": ci.mean,
                 "score_ci_lo": ci.lo,
@@ -335,6 +401,7 @@ class BenchRunner:
                     "model": cell.model,
                     "axes": cell.axes_dict,
                     "n": len(grades),
+                    "n_excluded": n_excluded,
                     "score": ci.mean,
                     "ci_lo": ci.lo,
                     "ci_hi": ci.hi,

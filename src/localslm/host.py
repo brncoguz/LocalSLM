@@ -98,8 +98,34 @@ class PowerState:
     """Whether we're on wall power. Apple Silicon throttles hard on battery,
     so a run that changed power source mid-flight is not internally comparable."""
 
-    on_ac: bool
+    # None means `pmset` could not be read. Deliberately not defaulted to True:
+    # an unreadable power source that claimed AC would reintroduce exactly the
+    # ~12% battery confound the split in `power_split` exists to catch, and it
+    # would do it invisibly.
+    on_ac: bool | None
     battery_pct: int | None
+
+
+def _parse_pmset(text: str) -> PowerState | None:
+    """Power source from `pmset -g batt`, or None if the output says nothing.
+
+    `pmset` names the source as "AC Power" or "Battery Power"; anything else —
+    empty output, an error message, a future format — is no answer rather than
+    an implied battery.
+    """
+    if "AC Power" in text:
+        on_ac = True
+    elif "Battery Power" in text:
+        on_ac = False
+    else:
+        return None
+
+    pct: int | None = None
+    for token in text.replace(";", " ").split():
+        if token.endswith("%") and token[:-1].isdigit():
+            pct = int(token[:-1])
+            break
+    return PowerState(on_ac=on_ac, battery_pct=pct)
 
 
 def power_state() -> PowerState:
@@ -108,14 +134,20 @@ def power_state() -> PowerState:
             ["pmset", "-g", "batt"], capture_output=True, text=True, timeout=2
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return PowerState(on_ac=True, battery_pct=None)
-    on_ac = "AC Power" in out
-    pct: int | None = None
-    for token in out.replace(";", " ").split():
-        if token.endswith("%") and token[:-1].isdigit():
-            pct = int(token[:-1])
-            break
-    return PowerState(on_ac=on_ac, battery_pct=pct)
+        out = ""
+    return _parse_pmset(out) or PowerState(on_ac=None, battery_pct=None)
+
+
+def power_label(state: PowerState | None = None) -> str:
+    """Power source as a stable lowercase token: "ac", "battery" or "unknown".
+
+    One definition, because this string becomes a benchmark cell axis — the API
+    and the CLI stamping different spellings would split one condition into two
+    incomparable cells. Pass a `PowerState` to label one already read rather
+    than shelling out to `pmset` a second time.
+    """
+    on_ac = (state or power_state()).on_ac
+    return "unknown" if on_ac is None else ("ac" if on_ac else "battery")
 
 
 def disk_free_bytes(path: str = ".") -> int:
