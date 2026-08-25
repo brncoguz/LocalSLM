@@ -110,6 +110,73 @@ async def timeline(limit: int = Query(1000, le=5000)) -> dict:
     }
 
 
+@router.get("/disagreements")
+async def disagreements(run_id: str = "", limit: int = 40) -> dict:
+    """Items that discriminate between models, and items nobody got.
+
+    Two different signals, both more useful than an average:
+
+    * **Disagreements** are where the models actually differ. On a suite where
+      everything scores 0.9, these few items carry all the information, and
+      they are the ones worth hand-verifying first.
+    * **Universal failures** usually mean the item is broken rather than the
+      models are — a wrong gold label, or an ambiguous prompt. Surfacing them
+      turns the benchmark into an aid for authoring the benchmark.
+    """
+    st = get_state()
+    where = "WHERE run_id = ?" if run_id else ""
+    args = (run_id,) if run_id else ()
+    rows = query(
+        st.conn,
+        f"""SELECT item_id, task, model, score, passed, pred_label, gold_label,
+                   detail_json, request_id, run_id
+            FROM results {where}""",
+        args,
+    )
+
+    by_item: dict[str, list[Any]] = {}
+    for row in rows:
+        by_item.setdefault(row["item_id"], []).append(row)
+
+    split, unanimous_fail = [], []
+    for item_id, entries in by_item.items():
+        # One model's opinion is not a disagreement.
+        if len(entries) < 2:
+            continue
+        scores = [e["score"] or 0.0 for e in entries]
+        spread = max(scores) - min(scores)
+        payload = {
+            "item_id": item_id,
+            "task": entries[0]["task"],
+            "run_id": entries[0]["run_id"],
+            "spread": spread,
+            "models": [
+                {
+                    "model": e["model"],
+                    "score": e["score"],
+                    "passed": bool(e["passed"]),
+                    "pred": e["pred_label"],
+                    "gold": e["gold_label"],
+                    "request_id": e["request_id"],
+                }
+                for e in sorted(entries, key=lambda x: -(x["score"] or 0))
+            ],
+        }
+        if spread > 0:
+            split.append(payload)
+        elif max(scores) == 0.0:
+            unanimous_fail.append(payload)
+
+    split.sort(key=lambda d: -d["spread"])
+    return {
+        "disagreements": split[:limit],
+        "all_failed": unanimous_fail[:limit],
+        "n_items": len(by_item),
+        "n_disagreements": len(split),
+        "n_all_failed": len(unanimous_fail),
+    }
+
+
 @router.get("/summary")
 async def summary() -> dict:
     """Per-model rollups plus the exclusion ledger.

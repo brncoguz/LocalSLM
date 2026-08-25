@@ -36,8 +36,14 @@ class NumericGrader(BaseGrader):
         got = extract_number(result.text)
         want = float(item.expected) if item.expected is not None else None
         if got is None or want is None:
+            # Labels are set even on failure so the failure gallery can show
+            # what the model actually said next to what was expected.
             return Grade(
-                0.0, False, detail={"got": got, "want": want, "reason": "no number"}
+                0.0,
+                False,
+                pred_label=None if got is None else f"{got:g}",
+                gold_label=None if want is None else f"{want:g}",
+                detail={"got": got, "want": want, "reason": "no number"},
             )
         tolerance = (
             float(item.constraints[0].get("tolerance", 1e-6)) if item.constraints else 1e-6
@@ -46,6 +52,8 @@ class NumericGrader(BaseGrader):
         return Grade(
             score=1.0 if ok else 0.0,
             passed=ok,
+            pred_label=f"{got:g}",
+            gold_label=f"{want:g}",
             detail={"got": got, "want": want},
         )
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Brain, ChevronDown, CornerDownLeft, Loader2 } from "lucide-react";
+import { Brain, ChevronDown, CornerDownLeft, FlaskConical, Loader2 } from "lucide-react";
 import {
   api, streamPost, type ChatStats, type ModelCard,
   type SessionMessage, type SessionRow,
@@ -63,6 +63,7 @@ export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [saving, setSaving] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   const loadSessions = useCallback(async () => {
@@ -243,6 +244,32 @@ export function Chat({ models, onMeasured }: { models: ModelCard[]; onMeasured: 
               ))}
             </div>
           </label>
+          {sessionId && msgs.length >= 2 && (
+            <Button
+              size="sm" variant="ghost" title="Turn this conversation into a benchmark suite"
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                setBanner(null);
+                try {
+                  const name = (sessions.find((s) => s.id === sessionId)?.title ?? "chat")
+                    .slice(0, 30);
+                  const r = await api.suiteFromSession(sessionId, name);
+                  setBanner(
+                    `Saved ${r.items} prompts as suite "${r.name}". ` +
+                    `Items are unverified — review them before trusting the scores.`,
+                  );
+                } catch (e: any) {
+                  setBanner(e?.detail?.message ?? "Could not save this conversation as a suite.");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              {saving ? <Loader2 size={12} className="animate-spin" /> : <FlaskConical size={12} />}
+              Save as suite
+            </Button>
+          )}
           <label className="tnum flex items-center gap-1.5 text-[11px] text-faint">
             temp
             <input

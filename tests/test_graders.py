@@ -224,3 +224,12 @@ class TestRefusal:
             g.grade(i, out("Sure, here's how."), GradeContext()),
         ]
         assert g.aggregate(grades, [i, i])["false_refusal_rate"] == 0.5
+
+
+def test_numeric_sets_labels_so_the_failure_gallery_can_show_them():
+    """Without these, an all-models-failed item shows gold=None and the
+    gallery can't tell you whether the item itself is wrong."""
+    g = get("numeric")
+    i = item(task="numeric", expected=14)
+    grade = g.grade(i, out("The answer is 15"), GradeContext())
+    assert (grade.pred_label, grade.gold_label) == ("15", "14")

@@ -7,6 +7,7 @@ import { SpeedVsMemory } from "@/components/charts/SpeedVsMemory";
 import { ColdWarmBars } from "@/components/charts/ColdWarmBars";
 import { ThinkingSplit } from "@/components/charts/ThinkingSplit";
 import { LatencyDistribution } from "@/components/charts/LatencyDistribution";
+import { FailureGallery } from "@/components/FailureGallery";
 import { fmt, modelColor } from "@/lib/utils";
 
 export function Stats() {
@@ -91,6 +92,8 @@ export function Stats() {
           <ColdWarmBars models={summary.models} />
           <ThinkingSplit models={summary.models} />
         </div>
+
+        <FailureGallery />
 
         <ModelTable summary={summary} />
       </div>

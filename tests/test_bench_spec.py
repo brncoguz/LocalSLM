@@ -207,3 +207,83 @@ def test_interrupted_runs_are_closed_out_on_startup(conn):
     }
     assert rows["live"] == ("aborted", "interrupted")
     assert rows["old"] == ("done", None)  # finished runs are untouched
+
+
+class TestDeterminism:
+    def test_identical_outputs_are_fully_deterministic(self):
+        from localslm.bench.determinism import stability
+
+        s = stability(["42", "42", "42"])
+        assert s.fully_deterministic and s.exact_duplicate_rate == 1.0
+
+    def test_duplicate_rate_is_the_modal_share(self):
+        from localslm.bench.determinism import stability
+
+        s = stability(["a", "a", "a", "b"])
+        assert s.exact_duplicate_rate == 0.75
+        assert s.distinct == 2
+
+    def test_formatting_noise_is_not_counted_as_instability(self):
+        """A trailing space is not a different answer; counting it as one
+        would overstate how unstable the model is."""
+        from localslm.bench.determinism import stability
+
+        assert stability(["42", " 42 ", "42."]).fully_deterministic
+
+    def test_length_variance_survives_normalisation(self):
+        """Text may normalise identically while the raw outputs differ in
+        length — that verbosity swing is still worth reporting."""
+        from localslm.bench.determinism import stability
+
+        s = stability(["42", "42.        "])
+        assert s.fully_deterministic
+        assert s.length_stdev > 0
+
+    def test_empty_input_does_not_crash(self):
+        from localslm.bench.determinism import stability
+
+        assert stability([]).n == 0
+
+
+class TestThinkingBudget:
+    """A cap tuned for direct answers truncates a reasoning model mid-thought,
+    so it scores zero for running out of room rather than for being wrong."""
+
+    def test_thinking_cells_get_a_larger_token_budget(self):
+        from localslm.bench.runner import (
+            NUM_PREDICT_DIRECT,
+            NUM_PREDICT_THINKING,
+            BenchRunner,
+        )
+        from localslm.bench.spec import Cell
+
+        runner = BenchRunner(state=None, spec=spec(), run_id="r", label="t")
+        item = TaskItem(id="i", task="numeric", prompt="p", expected=1)
+
+        def budget(axes):
+            unit = type("U", (), {"cell": Cell("m", axes), "item": item, "seed": 1})()
+            return runner._build(unit, None).options.num_predict
+
+        assert budget((("think", False),)) == NUM_PREDICT_DIRECT
+        assert budget((("think", "high"),)) == NUM_PREDICT_THINKING
+        assert budget((("think", "low"),)) == NUM_PREDICT_THINKING
+        assert budget(()) == NUM_PREDICT_DIRECT
+
+
+def test_context_length_is_pinned_not_inherited():
+    """An unset num_ctx inherits Ollama's default, which varies by version and
+    environment — so runs stop being comparable, and the biggest driver of
+    resident memory goes unrecorded."""
+    from localslm.bench.runner import NUM_CTX_DIRECT, NUM_CTX_THINKING, BenchRunner
+    from localslm.bench.spec import Cell
+
+    runner = BenchRunner(state=None, spec=spec(), run_id="r", label="t")
+    item = TaskItem(id="i", task="numeric", prompt="p", expected=1)
+
+    def ctx(axes):
+        unit = type("U", (), {"cell": Cell("m", axes), "item": item, "seed": 1})()
+        return runner._build(unit, None).options.num_ctx
+
+    assert ctx(()) == NUM_CTX_DIRECT
+    assert ctx((("think", "high"),)) == NUM_CTX_THINKING
+    assert NUM_CTX_THINKING > NUM_CTX_DIRECT

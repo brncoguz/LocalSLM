@@ -7,6 +7,9 @@ import {
 } from "@/lib/api";
 import { Badge, Button } from "@/components/ui/primitives";
 import { ScoreBars } from "@/components/charts/ScoreBars";
+import { DeterminismPanel } from "@/components/charts/DeterminismPanel";
+import { ThinkingCurve } from "@/components/charts/ThinkingCurve";
+import { TtftVsTtfat } from "@/components/charts/TtftVsTtfat";
 import { cn, modelColor } from "@/lib/utils";
 
 type Progress = { done: number; total: number; cell: string; item: string; passed: boolean };
@@ -20,6 +23,7 @@ export function Bench({ models }: { models: string[] }) {
   const [pickedSuites, setPickedSuites] = useState<string[]>([]);
   const [repeats, setRepeats] = useState(1);
   const [think, setThink] = useState<string[]>(["false"]);
+  const [temps, setTemps] = useState<number[]>([0]);
   const [running, setRunning] = useState<string | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,8 +44,8 @@ export function Bench({ models }: { models: string[] }) {
   const itemCount = suites.filter((s) => pickedSuites.includes(s.name))
     .reduce((n, s) => n + s.items, 0);
   // Mirrors BenchSpec.total_requests: warmups are per suite, not per item.
-  const estimate = pickedModels.length * itemCount * repeats
-    + pickedModels.length * pickedSuites.length;
+  const cellCount = pickedModels.length * Math.max(think.length, 1) * Math.max(temps.length, 1);
+  const estimate = cellCount * itemCount * repeats + cellCount * pickedSuites.length;
 
   async function start() {
     setError(null);
@@ -49,7 +53,7 @@ export function Bench({ models }: { models: string[] }) {
     try {
       const { run_id } = await api.startRun({
         models: pickedModels, suites: pickedSuites, repeats,
-        think_levels: think, label: "ui",
+        think_levels: think, temperatures: temps, label: "ui",
       });
       setRunning(run_id);
       const ctrl = new AbortController();
@@ -126,12 +130,28 @@ export function Bench({ models }: { models: string[] }) {
               </div>
             </div>
 
+            <div className="text-[11px] text-faint">
+              <span className="mb-1 block">temperature</span>
+              <div className="flex overflow-hidden rounded-md border border-border">
+                {[0, 0.7, 1].map((t) => (
+                  <button key={t}
+                    onClick={() => setTemps(
+                      temps.includes(t) ? temps.filter((x) => x !== t) : [...temps, t].sort(),
+                    )}
+                    className={cn("tnum px-2 py-1 text-[11px] transition-colors",
+                      temps.includes(t) ? "bg-accent/15 text-accent" : "text-faint hover:text-muted")}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="ml-auto flex items-center gap-3">
               <span className="tnum text-[11px] text-faint">
                 ~{estimate.toLocaleString()} requests
               </span>
               <Button onClick={() => void start()}
-                disabled={!!running || !pickedModels.length || !pickedSuites.length || !think.length}>
+                disabled={!!running || !pickedModels.length || !pickedSuites.length || !think.length || !temps.length}>
                 {running ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
                 {running ? "Running" : "Run"}
               </Button>
@@ -293,7 +313,16 @@ function RunCard({
 
       {open && (
         <div className="border-t border-border p-3">
-          {detail ? <RunCells cells={detail.cells} /> : <p className="text-[11px] text-faint">Loading…</p>}
+          {detail ? (
+            <div className="space-y-4">
+              <RunCells cells={detail.cells} />
+              <ThinkingCurve runId={run.id} />
+              <TtftVsTtfat runId={run.id} />
+              <DeterminismPanel runId={run.id} />
+            </div>
+          ) : (
+            <p className="text-[11px] text-faint">Loading…</p>
+          )}
         </div>
       )}
     </div>

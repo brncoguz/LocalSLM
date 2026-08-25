@@ -28,6 +28,18 @@ from localslm.db import write as db_write
 from localslm.inference.session import MeasuredSession, Provenance
 from localslm.runtimes.base import DecodeOptions, GenRequest, GenResult, Message, ModelRef
 
+NUM_PREDICT_DIRECT = 2048
+NUM_PREDICT_THINKING = 8192
+
+# Pinned rather than left to Ollama's default, for two reasons. The default
+# varies by version and by OLLAMA_CONTEXT_LENGTH, so an unset value makes runs
+# incomparable across machines without recording why. And context length is the
+# single biggest driver of resident memory — a 2 GB model at its advertised
+# 131k context needs ~18 GB — so leaving it unset is also how a benchmark ends
+# up swapping.
+NUM_CTX_DIRECT = 4096
+NUM_CTX_THINKING = 12288
+
 RETRY_PROMPT = (
     "That response could not be parsed as valid JSON matching the required schema.\n"
     "Error: {error}\n"
@@ -56,6 +68,7 @@ class BenchRunner:
 
     def _build(self, unit: Unit, info: Any) -> GenRequest:
         axes = unit.cell.axes_dict
+        thinking = axes.get("think", False) not in (False, "off", None)
         item = unit.item
         messages = []
         if item.context:
@@ -80,7 +93,12 @@ class BenchRunner:
             options=DecodeOptions(
                 temperature=float(axes.get("temperature", 0.0)),
                 seed=unit.seed,
-                num_predict=2048,
+                # A reasoning model spends most of its budget before it starts
+                # answering. A cap tuned for direct replies truncates it
+                # mid-thought, so it scores zero for running out of room rather
+                # than for being wrong — which measures the cap, not the model.
+                num_predict=NUM_PREDICT_THINKING if thinking else NUM_PREDICT_DIRECT,
+                num_ctx=NUM_CTX_THINKING if thinking else NUM_CTX_DIRECT,
             ),
             # Held long enough that the next unit in the same block is warm,
             # which is what makes model-blocked ordering worth doing.
@@ -198,6 +216,11 @@ class BenchRunner:
                 grade = get_grader(unit.item.task).grade(
                     unit.item, result, GradeContext(retry_used=retry_used)
                 )
+                # Ran out of budget before producing an answer: the score is
+                # real, but the reason is the cap, so record it separately.
+                if result.ttfat_ms is None and result.thinking_chunks:
+                    grade.metrics["truncated_while_thinking"] = 1.0
+                    grade.detail["truncated"] = True
                 self._record(unit, grade, request_id, result)
                 done += 1
                 yield BenchEvent(

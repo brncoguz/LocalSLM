@@ -28,6 +28,8 @@ Chat and benchmarks write to the same table. Every generation, whether it came f
 
 Requests measured on a loaded machine are excluded rather than reported as slow. If the sampler detects swapping or critical memory pressure while a request is running, the row is flagged with an `excluded` reason. It stays visible in the trace view for debugging but never reaches an average, and the filter lives in SQL so no chart can forget to apply it. On a 16 GB machine this happens regularly; 10 of the 43 requests recorded so far are excluded, 3 of them for swapping.
 
+Comparisons are paired on the items every setting actually completed. Long reasoning runs push a 16 GB machine into swap, and those requests get excluded — correctly — leaving each setting with a different subset of items. Averaging over whatever survived would compare one setting on the questions it happened to finish against another on all of them, and read the difference as a property of the setting. The analysis endpoints intersect first, and report how many items were dropped.
+
 Time to first answer token is tracked separately from time to first token. Reasoning models stream their internal monologue before the reply, so TTFT can come in under a second while you wait half a minute to read anything useful. TTFAT measures the delay that actually matters, and it's the figure the UI leads with.
 
 ## Results so far
@@ -41,10 +43,11 @@ Time to first answer token is tracked separately from time to first token. Reaso
 | qwen3.5:4b | 38.7 | 0.54 s | 6.2 GB | 14.0× |
 | deepseek-r1:8b | 23.0 | 72.9 s | 6.1 GB | — |
 
-Sample sizes are small and each row comes from a handful of prompts, so treat these as early signal. The suite runner that produces proper confidence intervals is the next phase. A few results stood out:
+Sample sizes are small, so treat these as early signal. Where a claim is backed by a paired bootstrap the interval is quoted; where it isn't, it isn't.
 
-- **Reasoning cost 27× the latency for an identical answer.** `qwen3.5:4b` solved an arithmetic question in 1.4 seconds with thinking disabled and 39 seconds with it enabled, returning `$14` both times.
-- **`deepseek-r1:8b` ignores `think=False`.** It generates roughly 1,672 tokens either way, so "disable reasoning to go faster" doesn't transfer between models.
+- **Reasoning tripled accuracy on arithmetic, and cost 67× the latency.** `qwen3.5:4b` on nine shared maths items scored 0.33 with thinking off and 1.00 with it on — a paired gain of +0.667 (95% CI [+0.333, +1.000], n=9). It answers in 0.5 s without reasoning and 33.6 s with it, spending roughly 1,010 tokens thinking before writing one line.
+- **The `think` level is binary for this model, not graded.** `low` and `high` produced identical token counts and identical timings — a measured difference of 0.000 with a zero-width interval. Ollama accepts `low`/`medium`/`high`, but `qwen3.5:4b` appears to treat anything non-false the same way.
+- **`deepseek-r1:8b` ignores `think=False`** — roughly 1,672 tokens either way. Between that and the point above, controlling reasoning to trade accuracy for speed is not portable: one model ignores the off switch, another ignores the intensity dial.
 - **A 2 GB model needed 17.8 GB at full context.** `llama3.2:3b` grows from 2.31 GB resident at 2k context to 17.77 GB at its advertised 131k limit, which is more than this machine has. File size on disk says very little about whether a model will actually run.
 - **Cold-start detection was wrong at first.** Ollama reports 137–305 ms of `load_duration` even when the weights are already resident, so an initial threshold of 100 ms flagged every request as cold. Residency is now read from `/api/ps` before the request starts, and `localslm repair` re-scores the older rows.
 
