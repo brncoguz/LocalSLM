@@ -47,6 +47,15 @@ RETRY_PROMPT = (
 )
 
 
+def _brief(expected: Any) -> str:
+    """The expected answer as one short string, whatever shape it was."""
+    if expected is None:
+        return ""
+    if isinstance(expected, list):
+        return ", ".join(str(e) for e in expected)[:200]
+    return str(expected)[:200]
+
+
 class BenchAborted(RuntimeError):
     pass
 
@@ -221,7 +230,7 @@ class BenchRunner:
                 if result.ttfat_ms is None and result.thinking_chunks:
                     grade.metrics["truncated_while_thinking"] = 1.0
                     grade.detail["truncated"] = True
-                self._record(unit, grade, request_id, result)
+                excluded = self._record(unit, grade, request_id, result)
                 done += 1
                 yield BenchEvent(
                     "unit",
@@ -237,6 +246,18 @@ class BenchRunner:
                         "decode_tps": result.server.decode_tps if result.server else None,
                         "ttfat_ms": result.ttfat_ms,
                         "pass_idx": unit.pass_idx,
+                        # The actual work, so a run is watchable rather than a
+                        # counter. Truncated because a long run streams
+                        # hundreds of these and nobody reads past a few lines.
+                        "prompt": unit.item.prompt[:400],
+                        "answer": result.text[:400],
+                        "expected": _brief(unit.item.expected),
+                        "thinking_tokens": result.thinking_chunks,
+                        # A measurement thrown out for swapping still happened,
+                        # and hiding it would make the live view disagree with
+                        # the totals it is counting towards.
+                        "excluded": excluded,
+                        "elapsed_s": round(time.time() - started, 1),
                     },
                 )
 
@@ -263,7 +284,8 @@ class BenchRunner:
 
     def _record(
         self, unit: Unit, grade: Any, request_id: str | None, result: GenResult
-    ) -> None:
+    ) -> bool:
+        """Persist one graded unit. Returns whether its measurement survived."""
         # Whether the measurement survived is decided in `_persist`, after this
         # unit has already been generated and graded — a window that swapped or
         # hit critical pressure gets flagged there. Read it back off the row
@@ -298,6 +320,7 @@ class BenchRunner:
             },
         )
         self._graded.setdefault(unit.cell.key, []).append((unit, grade, excluded))
+        return excluded
 
     def _was_excluded(self, request_id: str | None) -> bool:
         """Did the measurement behind this grade survive?

@@ -97,6 +97,11 @@ async def list_models() -> dict:
     cards = []
     for info in installed:
         live = loaded.get(info.ref.name)
+        # `/api/tags` does not carry capabilities, so this needs a `show` per
+        # model; the runtime caches them. Worth the calls: without it the bench
+        # form cannot tell that a non-thinking model collapses four think
+        # levels into one cell, and quotes an estimate four times too large.
+        caps = await st.runtime.capabilities(info.ref.name)
         cards.append(
             {
                 "name": info.ref.name,
@@ -106,6 +111,7 @@ async def list_models() -> dict:
                 "params_b": info.ref.params_b,
                 "size_bytes": info.size_bytes,
                 "state": "warm" if live else "cold",
+                "thinking": caps.thinking,
                 "vram_bytes": live.size_vram_bytes if live else None,
                 "expires_at": live.expires_at if live else None,
                 "headline": stats.get(info.ref.name),

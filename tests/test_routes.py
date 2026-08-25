@@ -111,6 +111,65 @@ class TestRunEndpoints:
 
         assert r.status_code in (400, 404, 422)
 
+    def test_replayed_units_match_what_the_live_stream_sent(self, client, conn):
+        """The run history and the live view render through the same component,
+        so the replay has to answer in the same shape. A field missing here
+        shows up as a blank in the history panel and nowhere else."""
+        run_id = self.seed_run(conn)
+        insert(
+            conn,
+            "requests",
+            {
+                "id": "req0",
+                "ts": 1.0,
+                "kind": "bench",
+                "run_id": run_id,
+                "runtime": "fake",
+                "model": "m:4b",
+                "output_text": "63",
+                "prompt_json": '[["user", "How much do 21 pens cost?"]]',
+                "decode_tps": 100.0,
+            },
+        )
+        insert(
+            conn,
+            "results",
+            {
+                "id": "res0",
+                "run_id": run_id,
+                "request_id": "req0",
+                "model": "m:4b",
+                "item_id": "m1",
+                "task": "numeric",
+                "grader": "numeric",
+                "score": 0.0,
+                "passed": 0,
+                "gold_label": "14",
+            },
+        )
+
+        body = client.get(f"/api/runs/{run_id}/units").json()
+
+        assert body["n"] == 1
+        unit = body["units"][0]
+        for key in (
+            "done",
+            "total",
+            "cell",
+            "model",
+            "suite",
+            "item",
+            "passed",
+            "prompt",
+            "answer",
+            "expected",
+            "excluded",
+        ):
+            assert key in unit, f"replay is missing {key}"
+
+    def test_replaying_an_unknown_run_is_a_404(self, client):
+        assert client.get("/api/runs/nope/units").status_code == 404
+
 
 class TestChatSessions:
     """The session lifecycle, and the one guarantee the README makes about it."""

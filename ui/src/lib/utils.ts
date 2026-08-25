@@ -25,6 +25,16 @@ export const fmt = {
     if (v < 1000) return `${Math.round(v)} ms`;
     return `${(v / 1000).toFixed(v < 10000 ? 2 : 1)} s`;
   },
+  /** Seconds as a wall-clock span. Minutes matter for a benchmark; a bare
+   *  "437 s" makes nobody picture seven minutes. */
+  duration(seconds: number | null | undefined): string {
+    if (seconds == null) return "—";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  },
   tps(v: number | null | undefined): string {
     return v == null ? "—" : `${v.toFixed(1)}`;
   },

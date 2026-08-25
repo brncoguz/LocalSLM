@@ -301,3 +301,45 @@ def test_the_plan_records_every_axis_a_rerun_needs():
     assert plan["temperatures"] == [0.0, 0.7]
     assert plan["think_levels"] == ["False", "high"]
     assert plan["repeats"] == s.repeats
+
+
+class TestNonThinkingModelsCollapse:
+    """A model with no think capability produces one cell, not four.
+
+    Running `low`, `medium` and `high` against a model that ignores them would
+    quadruple the runtime to write four identical rows. The collapse is right —
+    but it is also why the bench form's request estimate has to know about
+    capability. Multiplying by the number of think levels promised 84 requests
+    for a run that was only ever going to make 20.
+    """
+
+    def spec_for(self, capable: bool, levels):
+        return BenchSpec(
+            models=["m:4b"],
+            suites=[suite("math", 10)],
+            think_levels=levels,
+            repeats=2,
+            warmups=1,
+            thinking_capable={"m:4b": capable},
+        )
+
+    def test_four_levels_collapse_to_one_cell(self):
+        s = self.spec_for(False, [False, "low", "medium", "high"])
+
+        assert len(s.cells()) == 1
+        # 1 cell x 10 items x 2 repeats, plus one warmup for the single suite.
+        assert s.total_requests() == 21
+
+    def test_a_thinking_model_keeps_all_four(self):
+        s = self.spec_for(True, [False, "low", "medium", "high"])
+
+        assert len(s.cells()) == 4
+        assert s.total_requests() == 84
+
+    def test_a_non_thinking_model_with_no_off_level_contributes_nothing(self):
+        """The severe case: every selected level needs a capability the model
+        lacks, so it produces no cells at all and silently sits out the run."""
+        s = self.spec_for(False, ["low", "high"])
+
+        assert s.cells() == []
+        assert s.total_requests() == 0

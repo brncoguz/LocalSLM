@@ -291,8 +291,40 @@ def rating_histogram(conn: Connection, run_id: str) -> dict[str, int]:
     return {str(r["rating"]): r["n"] for r in rows}
 
 
+def _score_pairs(pairs: list[tuple[bool, bool]]) -> dict[str, Any]:
+    """Agreement statistics for a set of (judge_passed, grader_passed) pairs."""
+    n = len(pairs)
+    both_pass = sum(1 for j, g in pairs if j and g)
+    judge_only = sum(1 for j, g in pairs if j and not g)
+    grader_only = sum(1 for j, g in pairs if not j and g)
+    both_fail = sum(1 for j, g in pairs if not j and not g)
+    return {
+        "n": n,
+        "agreement_rate": (both_pass + both_fail) / n if n else None,
+        "kappa": _kappa(both_pass, judge_only, grader_only, both_fail),
+        "judge_pass_rate": (both_pass + judge_only) / n if n else None,
+        "grader_pass_rate": (both_pass + grader_only) / n if n else None,
+        "false_pass_rate": judge_only / n if n else None,
+        "false_fail_rate": grader_only / n if n else None,
+        "confusion": {
+            "both_pass": both_pass,
+            "judge_pass_grader_fail": judge_only,
+            "judge_fail_grader_pass": grader_only,
+            "both_fail": both_fail,
+        },
+    }
+
+
 def agreement(conn: Connection, run_id: str) -> dict[str, Any]:
-    """Compare stored verdicts against the deterministic grades for one run."""
+    """Compare stored verdicts against the deterministic grades for one run.
+
+    Reported per task as well as overall, because a judge's competence is not
+    one property. Measured here, the same judge scores 0.88 on `exact` — near
+    perfect — and below zero on `refusal`, which is worse than guessing. A
+    single figure averages those into a middling number that describes neither,
+    and would be quoted as though the judge were uniformly mediocre rather than
+    excellent at one job and unusable at another.
+    """
     rows = query(
         conn,
         f"""SELECT v.passed AS judge_passed, v.parse_ok, v.rating, v.judge_model,
@@ -331,10 +363,22 @@ def agreement(conn: Connection, run_id: str) -> dict[str, Any]:
         if bool(r["judge_passed"]) != bool(r["grader_passed"])
     ]
 
+    by_task: dict[str, dict[str, Any]] = {}
+    for task in sorted({r["task"] for r in usable if r["task"]}):
+        pairs = [
+            (bool(r["judge_passed"]), bool(r["grader_passed"]))
+            for r in usable
+            if r["task"] == task
+        ]
+        by_task[task] = _score_pairs(pairs)
+
     return {
         "run_id": run_id,
         "judge_model": rows[0]["judge_model"],
         "n": n,
+        # Where the judge can and cannot be trusted, which is the part that
+        # decides whether to use it on a given suite at all.
+        "by_task": by_task,
         # How the judge spent the scale. A judge that only ever says 5 is not
         # grading, and the headline agreement rate will not show that.
         "rating_histogram": rating_histogram(conn, run_id),

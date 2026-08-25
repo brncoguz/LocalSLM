@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle, CheckCircle2, ChevronRight, Loader2, Play, RotateCcw, Trash2, XCircle,
+  AlertTriangle, ChevronRight, Loader2, Play, RotateCcw, Trash2, X,
 } from "lucide-react";
 import {
-  api, streamGet, type CellResult, type RunDetail, type RunRow, type SuiteInfo,
+  api, streamGet, type CellResult, type ModelCard, type RunDetail, type RunRow,
+  type SuiteInfo,
 } from "@/lib/api";
+
+/** The two spellings the think axis uses for "no reasoning". Mirrors the
+ *  runner, which maps both onto `False`. */
+const isOff = (t: string) => t === "false" || t === "off";
 import { Badge, Button } from "@/components/ui/primitives";
+import { BenchLive } from "@/components/BenchLive";
+import { ItemBrowser, type LiveUnit } from "@/components/ItemBrowser";
 import { ScoreBars } from "@/components/charts/ScoreBars";
 import { DeterminismPanel } from "@/components/charts/DeterminismPanel";
 import { JudgePanel } from "@/components/charts/JudgePanel";
@@ -14,11 +21,13 @@ import { TtftVsTtfat } from "@/components/charts/TtftVsTtfat";
 import { cn, modelColor } from "@/lib/utils";
 import { isDemo } from "@/lib/demo";
 
-type Progress = { done: number; total: number; cell: string; item: string; passed: boolean };
+
 
 const THINK_LEVELS = ["false", "low", "medium", "high"];
 
-export function Bench({ models }: { models: string[] }) {
+export function Bench({ models: installed }: { models: ModelCard[] }) {
+  const models = installed.map((m) => m.name);
+  const canThink = new Map(installed.map((m) => [m.name, m.thinking]));
   const [suites, setSuites] = useState<SuiteInfo[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [pickedModels, setPickedModels] = useState<string[]>([]);
@@ -27,9 +36,15 @@ export function Bench({ models }: { models: string[] }) {
   const [think, setThink] = useState<string[]>(["false"]);
   const [temps, setTemps] = useState<number[]>([0]);
   const [running, setRunning] = useState<string | null>(null);
-  const [progress, setProgress] = useState<Progress | null>(null);
+  // Every unit seen this run, kept so the scoreboard and the heartbeat strip
+  // can be derived rather than accumulated in three separate pieces of state.
+  const [units, setUnits] = useState<LiveUnit[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [openRun, setOpenRun] = useState<string | null>(null);
+  // Set by clicking a suite or label tag on a run card. With a few dozen runs
+  // the list is mostly scrolling, and the tag you want to filter by is already
+  // on screen and under the cursor.
+  const [tagFilter, setTagFilter] = useState<{ kind: "suite" | "label"; value: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
@@ -45,16 +60,32 @@ export function Bench({ models }: { models: string[] }) {
 
   const itemCount = suites.filter((s) => pickedSuites.includes(s.name))
     .reduce((n, s) => n + s.items, 0);
+
+  // Mirrors BenchSpec.cells(): a model that cannot think has its non-off think
+  // levels dropped, because running four of them would produce four identical
+  // rows. Multiplying blindly by think.length promised 84 requests for a run
+  // that was only ever going to make 20.
+  const cellsFor = (name: string) => {
+    const levels = canThink.get(name) === false ? think.filter(isOff) : think;
+    return Math.max(levels.length, 0) * Math.max(temps.length, 1);
+  };
+  const cellCount = pickedModels.reduce((n, m) => n + cellsFor(m), 0);
   // Mirrors BenchSpec.total_requests: warmups are per suite, not per item.
-  const cellCount = pickedModels.length * Math.max(think.length, 1) * Math.max(temps.length, 1);
   const estimate = cellCount * itemCount * repeats + cellCount * pickedSuites.length;
+
+  // Models the think axis does not apply to, split by how badly. Losing the
+  // levels is a surprise; contributing no cells at all is a silent no-op.
+  const wantsThinking = think.some((t) => !isOff(t));
+  const nonThinking = pickedModels.filter((m) => canThink.get(m) === false);
+  const thinkIgnored = wantsThinking ? nonThinking : [];
+  const skippedEntirely = think.every((t) => !isOff(t)) ? nonThinking : [];
 
   /** Start a run from the form, or from a spec lifted off an earlier one.
    *  Same path either way — a rerun that took a different route could drift
    *  from the original in ways the comparison would then read as a result. */
   async function start(override?: Parameters<typeof api.startRun>[0]) {
     setError(null);
-    setProgress(null);
+    setUnits([]);
     try {
       const { run_id } = await api.startRun(
         override ?? {
@@ -67,10 +98,7 @@ export function Bench({ models }: { models: string[] }) {
       abortRef.current = ctrl;
       await streamGet(`/bench/runs/${run_id}/stream`, (ev, data) => {
         if (ev === "unit") {
-          setProgress({
-            done: data.done, total: data.total, cell: data.cell,
-            item: `${data.suite}/${data.item}`, passed: data.passed,
-          });
+          setUnits((prev) => [...prev, data as LiveUnit]);
         } else if (ev === "aborted") {
           setError(`Run stopped: ${data.reason}`);
         }
@@ -85,7 +113,8 @@ export function Bench({ models }: { models: string[] }) {
       );
     } finally {
       setRunning(null);
-      setProgress(null);
+      // The units stay on screen after the run ends: the last thing you were
+      // watching is usually the thing you want to look at again.
       void refresh();
     }
   }
@@ -120,6 +149,14 @@ export function Bench({ models }: { models: string[] }) {
       setError(e?.detail?.message ?? e?.message ?? "Could not repeat that run.");
     }
   }
+
+  const shownRuns = tagFilter
+    ? runs.filter((r) =>
+        tagFilter.kind === "label"
+          ? r.label === tagFilter.value
+          : r.suite.split(",").map((x) => x.trim()).includes(tagFilter.value),
+      )
+    : runs;
 
   const toggle = (list: string[], set: (v: string[]) => void, value: string) =>
     set(list.includes(value) ? list.filter((x) => x !== value) : [...list, value]);
@@ -203,21 +240,38 @@ export function Bench({ models }: { models: string[] }) {
             </div>
           </div>
 
-          {progress && (
-            <div className="mt-3.5 border-t border-border pt-3">
-              <div className="h-1 overflow-hidden rounded-full bg-surface-2">
-                <div className="h-full bg-accent transition-[width] duration-200"
-                  style={{ width: `${(progress.done / Math.max(progress.total, 1)) * 100}%` }} />
-              </div>
-              <div className="tnum mt-1.5 flex items-center gap-2 text-[11px] text-faint">
-                <span className="text-muted">{progress.done}/{progress.total}</span>
-                <span style={{ color: modelColor(progress.cell.split(" ")[0]) }}>{progress.cell}</span>
-                <span>{progress.item}</span>
-                {progress.passed
-                  ? <CheckCircle2 size={11} className="text-good" />
-                  : <XCircle size={11} className="text-bad" />}
-              </div>
-            </div>
+          {units.length > 0 && (
+            <BenchLive
+              units={units}
+              onStop={
+                running
+                  ? () => {
+                      void api.abortRun(running);
+                      abortRef.current?.abort();
+                    }
+                  : undefined
+              }
+            />
+          )}
+
+          {/* Said before the run rather than discovered during it. The planner
+              drops think levels a model cannot use — four identical rows help
+              nobody — but that silently makes the run a fraction of the size
+              the estimate promised. */}
+          {!!skippedEntirely.length && (
+            <p className="mt-3 rounded-md bg-bad/8 px-2.5 py-1.5 text-[11px] text-bad">
+              {skippedEntirely.join(", ")} cannot think, and every selected think
+              level needs it — {skippedEntirely.length === 1 ? "it" : "they"} will
+              contribute nothing. Add <span className="font-medium">off</span>, or
+              deselect {skippedEntirely.length === 1 ? "it" : "them"}.
+            </p>
+          )}
+          {!skippedEntirely.length && !!thinkIgnored.length && (
+            <p className="mt-3 rounded-md bg-warn/8 px-2.5 py-1.5 text-[11px] text-warn">
+              {thinkIgnored.join(", ")} cannot think, so the think levels are
+              skipped for {thinkIgnored.length === 1 ? "it" : "them"} — running
+              them would repeat identical rows. Already excluded from the estimate.
+            </p>
           )}
 
           {error && (
@@ -226,18 +280,39 @@ export function Bench({ models }: { models: string[] }) {
         </div>
 
         <section>
-          <h3 className="mb-2 text-sm font-semibold">Runs</h3>
-          {runs.length === 0 && (
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <h3 className="text-sm font-semibold">Runs</h3>
+            {tagFilter && (
+              <button
+                onClick={() => setTagFilter(null)}
+                className="flex items-center gap-1 rounded-md bg-accent/12 px-1.5 py-0.5 text-[11px] text-accent"
+                title="Clear this filter"
+              >
+                {tagFilter.kind}: {tagFilter.value}
+                <X size={10} />
+              </button>
+            )}
+            <span className="tnum ml-auto text-[11px] text-faint">
+              {shownRuns.length}
+              {shownRuns.length !== runs.length && ` of ${runs.length}`} runs
+            </span>
+          </div>
+          {shownRuns.length === 0 && (
             <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-[11px] text-faint">
-              No runs yet.
+              {runs.length ? "No runs match that tag." : "No runs yet."}
             </p>
           )}
           <div className="space-y-2">
-            {runs.map((r) => (
+            {shownRuns.map((r) => (
               <RunCard key={r.id} run={r}
                 open={openRun === r.id}
                 busy={!!running}
                 onToggle={() => setOpenRun(openRun === r.id ? null : r.id)}
+                onTag={(kind, value) =>
+                  setTagFilter((cur) =>
+                    cur?.kind === kind && cur.value === value ? null : { kind, value },
+                  )
+                }
                 onRerun={() => void rerun(r.id)}
                 onDeleted={() => { setOpenRun(null); void refresh(); }} />
             ))}
@@ -279,19 +354,27 @@ function Picker({
 }
 
 function RunCard({
-  run, open, busy: engineBusy, onToggle, onRerun, onDeleted,
+  run, open, busy: engineBusy, onToggle, onRerun, onTag, onDeleted,
 }: {
   run: RunRow; open: boolean; busy: boolean;
-  onToggle: () => void; onRerun: () => void; onDeleted: () => void;
+  onToggle: () => void; onRerun: () => void;
+  onTag: (kind: "suite" | "label", value: string) => void;
+  onDeleted: () => void;
 }) {
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  const [units, setUnits] = useState<LiveUnit[] | null>(null);
+
   useEffect(() => {
-    if (open && !detail) void api.run(run.id).then(setDetail);
-  }, [open, detail, run.id]);
+    if (!open) return;
+    if (!detail) void api.run(run.id).then(setDetail);
+    // Loaded only when a run is expanded: this is every prompt and answer the
+    // run produced, which is far too much to fetch for a list of runs.
+    if (!units) void api.runUnits(run.id).then((d) => setUnits(d.units)).catch(() => setUnits([]));
+  }, [open, detail, units, run.id]);
 
   async function remove() {
     setBusy(true);
@@ -309,26 +392,56 @@ function RunCard({
   const tone = run.status === "done" ? "good" : run.status === "running" ? "accent" : "bad";
   return (
     <div className="rounded-lg border border-border bg-surface">
+      {/* The tags are their own filters, so the header cannot be one big
+          button any more — nesting a button inside a button is invalid and
+          React refuses to route the clicks reliably. Expanding now hangs off
+          the chevron and the metadata line, both real buttons. */}
       <div className="flex items-center gap-1 pr-2">
-        <button onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left">
-          <ChevronRight size={13} className={cn("shrink-0 text-faint transition-transform", open && "rotate-90")} />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[12px] font-medium">{run.suite}</span>
-              <Badge tone={tone as never}>{run.status}</Badge>
-              {run.label && <Badge>{run.label}</Badge>}
-            </div>
-            <div className="tnum mt-0.5 flex flex-wrap gap-2 text-[11px] text-faint">
+        <button
+          onClick={onToggle}
+          aria-expanded={open}
+          title={open ? "Collapse" : "Show this run's items and charts"}
+          className="shrink-0 self-stretch px-3 text-faint hover:text-muted"
+        >
+          <ChevronRight size={13} className={cn("transition-transform", open && "rotate-90")} />
+        </button>
+        <div className="min-w-0 flex-1 py-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {run.suite.split(",").map((name) => name.trim()).filter(Boolean).map((name) => (
+              <button
+                key={name}
+                onClick={() => onTag("suite", name)}
+                className="rounded px-1 text-[12px] font-medium hover:bg-accent/12 hover:text-accent"
+                title={`Show only runs using ${name}`}
+              >
+                {name}
+              </button>
+            ))}
+            <Badge tone={tone as never}>{run.status}</Badge>
+            {run.label && (
+              <button
+                onClick={() => onTag("label", run.label)}
+                title={`Show only runs labelled ${run.label}`}
+                className="rounded-md hover:bg-accent/12"
+              >
+                <Badge>{run.label}</Badge>
+              </button>
+            )}
+          </div>
+          <button onClick={onToggle} className="block w-full text-left">
+            <span className="tnum mt-0.5 flex flex-wrap gap-2 text-[11px] text-faint">
               <span>{new Date(run.ts * 1000).toLocaleString()}</span>
               <span>{run.done_units}/{run.planned_units} items</span>
               {run.elapsed_s != null && <span>{run.elapsed_s.toFixed(0)}s</span>}
               <span>{run.models.length} models</span>
-            </div>
-          </div>
-          {run.best_score != null && (
-            <span className="tnum shrink-0 text-sm font-semibold">{run.best_score.toFixed(2)}</span>
-          )}
-        </button>
+            </span>
+          </button>
+        </div>
+        {run.best_score != null && (
+          <span className="tnum shrink-0 px-1 text-sm font-semibold">
+            {run.best_score.toFixed(2)}
+          </span>
+        )}
         <Button
           size="icon"
           variant="ghost"
@@ -371,6 +484,16 @@ function RunCard({
           {detail ? (
             <div className="space-y-4">
               <RunCells cells={detail.cells} />
+              {!!units?.length && (
+                <div className="rounded-xl border border-border bg-surface p-4">
+                  <h3 className="mb-2 text-sm font-semibold">Every item</h3>
+                  <p className="mb-2.5 text-[11px] text-faint">
+                    The run replayed in execution order — click a square to read
+                    the question and what the model answered.
+                  </p>
+                  <ItemBrowser units={units} />
+                </div>
+              )}
               <ThinkingCurve runId={run.id} />
               <TtftVsTtfat runId={run.id} />
               <DeterminismPanel runId={run.id} />

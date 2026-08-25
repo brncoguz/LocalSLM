@@ -21,7 +21,7 @@ from localslm.bench.agreement import agreement, judge_run, pending_rows, verdict
 from localslm.bench.determinism import stability
 from localslm.bench.graders import REGISTRY as GRADERS
 from localslm.bench.judge import build_judge
-from localslm.bench.runner import BenchRunner
+from localslm.bench.runner import BenchRunner, _brief
 from localslm.bench.spec import BenchSpec
 from localslm.bench.stats import Interval, paired_bootstrap, rank_with_ties
 from localslm.bench.suites import Suite, TaskItem, available, load, save
@@ -704,6 +704,110 @@ async def run_results(run_id: str, task: str = "", failed_only: bool = False) ->
         sql += " AND passed = 0"
     sql += " ORDER BY task, item_id LIMIT 500"
     return [dict(r) for r in query(st.conn, sql, args)]
+
+
+@router.get("/runs/{run_id}/units")
+async def run_units(run_id: str, limit: int = Query(1000, ge=1, le=5000)) -> dict:
+    """A finished run replayed in the shape the live view streams.
+
+    Same fields as the `unit` event, so the browser that watches a run in
+    flight also serves its history — one component, and no chance of the two
+    telling different stories about the same item.
+
+    Ordered by when each request actually ran rather than by item id: the
+    heartbeat strip is a timeline, and its streaks only mean anything in
+    execution order.
+    """
+    st = get_state()
+    runs = query(st.conn, "SELECT id, suite FROM runs WHERE id = ?", (run_id,))
+    if not runs:
+        raise HTTPException(404, "no such run")
+
+    # `results` records the grader, not the suite the item came from, and there
+    # is no column to add one to without a migration. The suites on disk still
+    # know, and this is the same lookup the judge does.
+    item_suite: dict[str, str] = {}
+    item_expected: dict[str, str] = {}
+    for name in (runs[0]["suite"] or "").split(","):
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            for item in load(name).items:
+                item_suite[item.id] = name
+                # `results.gold_label` is only set by the graders that deal in
+                # labels, so a schema or instruction item would replay with no
+                # expected value — the one thing you want beside a wrong answer.
+                item_expected[item.id] = _brief(item.expected)
+        except FileNotFoundError:
+            continue
+
+    cells = {
+        c["cell_key"]: c
+        for c in query(
+            st.conn,
+            "SELECT cell_key, model, axes_json FROM cells WHERE run_id = ?",
+            (run_id,),
+        )
+    }
+
+    rows = query(
+        st.conn,
+        """SELECT res.item_id, res.task, res.model, res.cell_key, res.score,
+                  res.passed, res.gold_label,
+                  req.output_text, req.prompt_json, req.decode_tps, req.ttfat_ms,
+                  req.thinking_tokens, req.excluded, req.ts
+           FROM results res JOIN requests req ON req.id = res.request_id
+           WHERE res.run_id = ? ORDER BY req.ts LIMIT ?""",
+        (run_id, limit),
+    )
+
+    units = []
+    for i, r in enumerate(rows, start=1):
+        cell = cells.get(r["cell_key"])
+        units.append(
+            {
+                "done": i,
+                "total": len(rows),
+                "cell": _cell_label(cell) if cell else r["model"],
+                "model": r["model"],
+                "suite": item_suite.get(r["item_id"], r["task"]),
+                "item": r["item_id"],
+                "score": r["score"],
+                "passed": bool(r["passed"]),
+                "decode_tps": r["decode_tps"],
+                "ttfat_ms": r["ttfat_ms"],
+                "prompt": _first_user(r["prompt_json"]),
+                "answer": (r["output_text"] or "")[:400],
+                "expected": item_expected.get(r["item_id"]) or r["gold_label"] or "",
+                "thinking_tokens": r["thinking_tokens"] or 0,
+                "excluded": bool(r["excluded"]),
+                "elapsed_s": 0.0,
+            }
+        )
+    return {"run_id": run_id, "n": len(units), "units": units}
+
+
+def _cell_label(cell: Any) -> str:
+    """`model (axis=value, ...)`, matching `Cell.label()` so a replayed run
+    names its cells exactly as the live view did."""
+    axes = json.loads(cell["axes_json"] or "{}")
+    if not axes:
+        return cell["model"]
+    return f"{cell['model']} ({', '.join(f'{k}={v}' for k, v in axes.items())})"
+
+
+def _first_user(prompt_json: str | None) -> str:
+    if not prompt_json:
+        return ""
+    try:
+        turns = json.loads(prompt_json)
+    except (ValueError, TypeError):
+        return ""
+    for role, text in turns:
+        if role == "user":
+            return text[:400]
+    return ""
 
 
 @router.get("/runs/{run_id}/compare")

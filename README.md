@@ -60,6 +60,16 @@ Sample sizes are small, so treat these as early signal. Where a claim is backed 
   which is why `localslm judge` reports kappa rather than raw agreement: on these
   suites a judge that approved everything would score 89%.
 
+- **"How good is the judge" has no single answer.** Broken down by task on one
+  run, the same `qwen3.5:9b` scores kappa **+1.00 on exact-match** and **-0.29
+  on refusal** — the second is worse than guessing. The overall figure, 0.47,
+  describes neither. The pattern is that it fails wherever verifying the answer
+  needs computation rather than reading: asked to check "describe a tree using
+  only words of 6 letters or fewer", it rated 5/5 an answer opening with
+  "description" and "Branches", and gave as its reason a restatement of the
+  rubric it had not applied. Judges evaluate plausibility; a grader that counts
+  letters is not replaceable by one.
+
 - **The judge found a bad test before a human did.** Of its two disagreements on
   the mixed run, one was a genuine judge error and the other was `classify` item
   `c10`, whose gold label was already disputed by both strong models. Pointing a

@@ -165,9 +165,62 @@ export function JudgePanel({ runId }: { runId: string }) {
 
         <RatingSpread histogram={data.rating_histogram} />
 
+        <ByTask byTask={data.by_task} />
+
         <JudgeVerdicts runId={runId} />
       </div>
     </ChartFrame>
+  );
+}
+
+/** Where the judge can and cannot be trusted.
+ *
+ *  The most important thing on this panel, and the reason the headline figure
+ *  above it should not be quoted alone. Competence is per task: the same judge
+ *  measured here scores 0.88 on exact-match — near perfect — and below zero on
+ *  refusal, which is worse than guessing. One number averages an excellent
+ *  grader and a useless one into a middling figure describing neither. */
+function ByTask({ byTask }: { byTask?: JudgeAgreement["by_task"] }) {
+  if (!byTask || Object.keys(byTask).length < 2) return null;
+  const rows = Object.entries(byTask).sort(
+    ([, a], [, b]) => (b.kappa ?? -Infinity) - (a.kappa ?? -Infinity),
+  );
+
+  return (
+    <div>
+      <p className="mb-1 text-[11px] uppercase tracking-wide text-faint">
+        agreement by task
+      </p>
+      <ul className="space-y-1">
+        {rows.map(([task, m]) => {
+          const band = kappaBand(m.kappa);
+          // Negative kappa has no bar to draw: the judge did worse than
+          // guessing, which is a different statement from "scored low".
+          const width = m.kappa === null ? 0 : Math.max(0, Math.min(1, m.kappa)) * 100;
+          return (
+            <li key={task} className="flex items-center gap-2 text-[11px]">
+              <span className="w-24 shrink-0 truncate">{task}</span>
+              <span className="tnum w-8 shrink-0 text-right text-faint">n={m.n}</span>
+              <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-2">
+                <div
+                  className={cn(
+                    "absolute top-0 h-full rounded-full",
+                    (m.kappa ?? 0) < 0.2 ? "bg-bad" : (m.kappa ?? 0) < 0.6 ? "bg-warn" : "bg-good",
+                  )}
+                  style={{ width: `${width}%` }}
+                />
+              </div>
+              <span className={cn("tnum w-10 shrink-0 text-right", band.tone)}>
+                {m.kappa === null ? "—" : m.kappa.toFixed(2)}
+              </span>
+              <span className="w-28 shrink-0 truncate text-faint" title={band.label}>
+                {m.kappa === null ? "not measurable" : band.label.split(" —")[0]}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 
@@ -315,6 +368,10 @@ function judgeError(e: unknown): string {
  *  actually moderate agreement. */
 function kappaBand(kappa: number | null) {
   if (kappa === null) return { label: "undefined", tone: "text-faint" };
+  // Below zero the judge and the grader disagree more often than two people
+  // picking at random would. That is a stronger statement than "scored low"
+  // and must not be softened into "barely better than guessing".
+  if (kappa < 0) return { label: "worse than guessing", tone: "text-bad" };
   if (kappa < 0.2) return { label: "slight — barely better than guessing", tone: "text-bad" };
   if (kappa < 0.4) return { label: "fair", tone: "text-warn" };
   if (kappa < 0.6) return { label: "moderate", tone: "text-warn" };

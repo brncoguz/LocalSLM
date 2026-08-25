@@ -68,6 +68,24 @@ cheapest path to the project's strongest finding.
 
 ## Bench UI
 
+- [x] The item browser works on finished runs too — `GET /runs/{id}/units`
+      replays a run in the same shape the live stream sends, so one component
+      serves both and they cannot disagree about what happened.
+- [x] Suite and label tags on a run card filter the run list. Required
+      un-nesting the header: tags inside the expander button were buttons
+      inside a button, which is invalid and routes clicks unreliably.
+- [x] Clickable heartbeat — every square opens that item in the detail card,
+      with prev/next stepping and a "next fail" jump. Pinning is keyed on the
+      unit's index rather than its position in the strip, which only keeps a
+      recent window.
+- [x] Live run view — the unit event now carries the question, the answer, the
+      expected value and whether the measurement survived, so a run is watchable
+      rather than a counter. Progress with ETA, a per-item heartbeat strip,
+      a running per-cell scoreboard, and the current question with its answer.
+- [x] Request estimate now mirrors `BenchSpec.cells()` — it multiplied by think
+      levels regardless of capability, so selecting four levels for a
+      non-thinking model promised 84 requests and ran 20. The form also says
+      up front which models will have their think levels dropped.
 - [x] Rerun button on a run card — repeats the stored plan exactly. Required
       adding `temperatures` to `summarise_plan`, which the plan had been
       omitting, so a repeat would silently have dropped that axis.
@@ -84,6 +102,13 @@ cheapest path to the project's strongest finding.
 
 ## Judge findings
 
+- [x] ~~One kappa for the judge~~ — agreement is now reported per task. The
+      same judge scores +1.00 on `exact` and -0.29 on `refusal` in one run, so
+      a single figure was averaging a usable grader with a misleading one.
+- [ ] **Never judge a task a grader can verify.** The failures cluster where
+      checking needs computation — arithmetic, letter counting — because a
+      judge rates plausibility. Consider refusing to judge `numeric`/`ifeval`
+      outright, or badging those verdicts as advisory.
 - [ ] **The local judge is systematically lenient.** Across 23 reference-free
       verdicts it never rejected a correct answer, but endorsed wrong ones at
       11% on `qwen3.5:4b` and 60% on `llama3.2:1b`. Any score built on it is

@@ -632,3 +632,118 @@ class TestVerdictDetail:
         run_id = self.seed(conn)
 
         assert rating_histogram(conn, run_id) == {"5": 1}
+
+
+class TestPerTaskAgreement:
+    """One kappa for a judge is an average over jobs it does very differently.
+
+    Measured on real runs the same judge scored 0.88 on exact-match and below
+    zero on refusal. Reporting only the overall figure would have it quoted as
+    uniformly mediocre, when it is in fact usable for one task and actively
+    misleading for another.
+    """
+
+    def seed(self, conn, rows, run_id="run-1"):
+        """rows: (task, item_id, grader_passed, judge_passed)."""
+        insert(conn, "runs", {"id": run_id, "ts": 1.0, "suite": "math", "status": "done"})
+        for idx, (task, item_id, grader_passed, judge_passed) in enumerate(rows):
+            request_id = f"req{idx}"
+            insert(
+                conn,
+                "requests",
+                {
+                    "id": request_id,
+                    "ts": 1.0 + idx,
+                    "kind": "bench",
+                    "run_id": run_id,
+                    "runtime": "fake",
+                    "model": "m:4b",
+                },
+            )
+            insert(
+                conn,
+                "results",
+                {
+                    "id": f"res{idx}",
+                    "run_id": run_id,
+                    "request_id": request_id,
+                    "model": "m:4b",
+                    "item_id": item_id,
+                    "task": task,
+                    "grader": task,
+                    "score": 1.0 if grader_passed else 0.0,
+                    "passed": int(grader_passed),
+                },
+            )
+            insert(
+                conn,
+                "judge_verdicts",
+                {
+                    "id": f"v{idx}",
+                    "ts": 1.0 + idx,
+                    "run_id": run_id,
+                    "request_id": request_id,
+                    "item_id": item_id,
+                    "task": task,
+                    "model": "m:4b",
+                    "judge_model": "judge:9b",
+                    "backend": "local",
+                    "parse_ok": 1,
+                    "passed": int(judge_passed),
+                    "rating": 5 if judge_passed else 1,
+                },
+            )
+        return run_id
+
+    def test_a_task_the_judge_is_good_at_is_not_dragged_down_by_one_it_is_bad_at(
+        self, conn
+    ):
+        """Perfect on one task, inverted on the other. The overall number lands
+        in the middle and describes neither, which is exactly why the split
+        exists."""
+        run_id = self.seed(
+            conn,
+            [
+                ("exact", "e1", True, True),
+                ("exact", "e2", True, True),
+                ("exact", "e3", False, False),
+                ("exact", "e4", False, False),
+                ("refusal", "r1", True, False),
+                ("refusal", "r2", True, False),
+                ("refusal", "r3", False, True),
+                ("refusal", "r4", False, True),
+            ],
+        )
+
+        by_task = agreement(conn, run_id)["by_task"]
+
+        assert by_task["exact"]["kappa"] == 1.0
+        assert by_task["refusal"]["kappa"] == -1.0
+        assert by_task["exact"]["n"] == 4
+
+    def test_each_task_carries_its_own_sample_size(self, conn):
+        """A kappa over three items is not the same claim as one over thirty,
+        and the panel has to be able to say so."""
+        run_id = self.seed(
+            conn,
+            [
+                ("numeric", "m1", True, True),
+                ("numeric", "m2", False, False),
+                ("exact", "e1", True, True),
+            ],
+        )
+
+        by_task = agreement(conn, run_id)["by_task"]
+
+        assert by_task["numeric"]["n"] == 2
+        assert by_task["exact"]["n"] == 1
+
+    def test_a_task_where_neither_side_varied_reports_undefined(self, conn):
+        """`grounded_qa` passes everything for every model, so there is nothing
+        for a judge to get right or wrong. Zero would read as failure."""
+        run_id = self.seed(
+            conn,
+            [("grounded", "g1", True, True), ("grounded", "g2", True, True)],
+        )
+
+        assert agreement(conn, run_id)["by_task"]["grounded"]["kappa"] is None

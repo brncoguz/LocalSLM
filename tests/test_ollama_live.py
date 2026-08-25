@@ -52,8 +52,20 @@ async def test_show_reports_capabilities_and_context(rt):
 async def test_client_and_server_throughput_agree(rt):
     """A large divergence between our own timing and Ollama's own counters
     would mean the streaming path is adding overhead — worth failing over."""
+    # Deliberately not `models[0]`: whichever model Ollama happens to list
+    # first may be a reasoner, and `deepseek-r1:8b` ignores `think=False`
+    # entirely — it spends the whole 64-token budget on its monologue and
+    # returns no answer text, failing an assertion about throughput for a
+    # reason that has nothing to do with throughput.
     models = await rt.list_models()
-    name = models[0].ref.name
+    name = None
+    for m in models:
+        if not (await rt.capabilities(m.ref.name)).thinking:
+            name = m.ref.name
+            break
+    if name is None:
+        pytest.skip("every installed model reasons; this test needs a direct answer")
+
     result = await rt.generate(
         GenRequest(
             model=ModelRef("ollama", name),

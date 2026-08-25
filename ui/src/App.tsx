@@ -78,7 +78,7 @@ export default function App() {
         ) : tab === "models" ? (
           <Models data={models} refresh={refresh} />
         ) : tab === "bench" ? (
-          <Bench models={(models?.installed ?? []).map((m) => m.name)} />
+          <Bench models={models?.installed ?? []} />
         ) : (
           <Stats />
         )}

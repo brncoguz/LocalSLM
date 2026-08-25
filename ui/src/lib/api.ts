@@ -2,6 +2,7 @@
  *  when they drift, this file is the one place to fix. */
 
 import { demoGet, demoRefuse, isDemo } from "@/lib/demo";
+import type { LiveUnit } from "@/components/ItemBrowser";
 
 export interface Health {
   ok: boolean;
@@ -36,6 +37,9 @@ export interface Headline {
 export interface ModelCard {
   name: string; digest: string | null; family: string | null; quant: string | null;
   params_b: number | null; size_bytes: number; state: "warm" | "cold";
+  /** Whether the model supports a think axis at all. A model that doesn't has
+   *  its non-off think levels dropped when the run is planned. */
+  thinking: boolean;
   vram_bytes: number | null; expires_at: string | null; headline: Headline | null;
 }
 
@@ -185,6 +189,14 @@ export interface JudgeAgreement {
   grader_pass_rate?: number | null;
   false_pass_rate?: number | null;
   false_fail_rate?: number | null;
+  /** Agreement per task. A judge's competence is not one property: the same
+   *  judge can be near-perfect at semantic matching and worse than chance at
+   *  refusal, and the overall figure describes neither. */
+  by_task?: Record<string, {
+    n: number; kappa: number | null; agreement_rate: number | null;
+    judge_pass_rate: number | null; grader_pass_rate: number | null;
+    false_pass_rate: number | null; false_fail_rate: number | null;
+  }>;
   /** Counts per 1-5 rating. A judge that only ever says 5 is not grading, and
    *  the headline agreement rate will not reveal that. */
   rating_histogram?: Record<string, number>;
@@ -354,6 +366,8 @@ export const api = {
         body: JSON.stringify({ limit }),
       },
     ),
+  runUnits: (id: string) =>
+    json<{ run_id: string; n: number; units: LiveUnit[] }>(`/runs/${id}/units`),
   runResults: (id: string, failedOnly = false) =>
     json<ResultRow[]>(`/runs/${id}/results?failed_only=${failedOnly}`),
   startRun: (body: {

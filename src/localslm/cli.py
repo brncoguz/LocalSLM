@@ -192,6 +192,7 @@ def export_demo(
                 "/judge-verdicts?only=disagreements&limit=60",
                 "/judge-verdicts?only=all&limit=60",
                 "/judge-verdicts?only=parse_failures&limit=60",
+                "/units",
             ):
                 capture(f"/api/runs/{rid}{suffix}")
 
