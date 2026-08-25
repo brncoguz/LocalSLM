@@ -111,6 +111,41 @@ export interface StatsSummary {
   totals: { requests: number; included: number; failed: number };
 }
 
+export interface ItemVerdict {
+  model: string; score: number; passed: boolean;
+  pred: string | null; gold: string | null; request_id: string;
+}
+
+export interface DisagreementItem {
+  item_id: string; task: string; run_id: string;
+  spread: number; models: ItemVerdict[];
+}
+
+export interface Disagreements {
+  disagreements: DisagreementItem[];
+  all_failed: DisagreementItem[];
+  n_items: number; n_disagreements: number; n_all_failed: number;
+}
+
+export interface ThinkingPoint {
+  cell_key: string; model: string; think: string; n: number;
+  accuracy: number; thinking_tokens: number; answer_tokens: number;
+  think_ratio: number; overthink_rate: number;
+  ttft_ms: number | null; ttfat_ms: number | null; total_ms: number | null;
+}
+
+export interface DeterminismCell {
+  cell_key: string; model: string; temperature: number; think: string;
+  n_items: number; samples_per_item: number;
+  mean_duplicate_rate: number; fully_deterministic_items: number;
+  items: Record<string, {
+    n: number; distinct: number; exact_duplicate_rate: number;
+    length_mean: number; length_stdev: number;
+    score_mean: number | null; score_stdev: number | null;
+    fully_deterministic: boolean;
+  }>;
+}
+
 export interface SessionRow {
   id: string; ts: number; title: string; model: string; messages: number;
 }
@@ -192,16 +227,37 @@ export const api = {
   deleteSession: (id: string) =>
     json<{ measurements_kept: number }>(`/sessions/${id}`, { method: "DELETE" }),
   statsSummary: () => json<StatsSummary>("/stats/summary"),
+  disagreements: (runId = "", limit = 40) =>
+    json<Disagreements>(
+      `/stats/disagreements?limit=${limit}${runId ? `&run_id=${runId}` : ""}`,
+    ),
   timeline: (limit = 1000) =>
     json<{ points: Point[]; models: string[] }>(`/stats/timeline?limit=${limit}`),
   suites: () => json<SuiteInfo[]>("/suites"),
+  suiteFromSession: (sessionId: string, name: string, task = "contains") =>
+    json<{ name: string; items: number; path: string }>(
+      `/suites/from-session/${sessionId}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, task }),
+      },
+    ),
   runs: (limit = 50) => json<RunRow[]>(`/runs?limit=${limit}`),
   run: (id: string) => json<RunDetail>(`/runs/${id}`),
+  thinking: (id: string) =>
+    json<{ run_id: string; points: ThinkingPoint[]; note: string | null }>(
+      `/runs/${id}/thinking`,
+    ),
+  determinism: (id: string) =>
+    json<{ run_id: string; cells: DeterminismCell[]; note: string | null }>(
+      `/runs/${id}/determinism`,
+    ),
   runResults: (id: string, failedOnly = false) =>
     json<ResultRow[]>(`/runs/${id}/results?failed_only=${failedOnly}`),
   startRun: (body: {
     models: string[]; suites: string[]; repeats: number;
-    think_levels: string[]; label: string;
+    think_levels: string[]; temperatures?: number[]; label: string;
   }) =>
     json<{ run_id: string; total_requests: number; cells: number }>("/bench/runs", {
       method: "POST",

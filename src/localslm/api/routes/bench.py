@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -16,10 +17,12 @@ from pydantic import BaseModel, Field
 
 from localslm.api.deps import get_state
 from localslm.api.sse import event, sse
+from localslm.bench.determinism import stability
+from localslm.bench.graders import REGISTRY as GRADERS
 from localslm.bench.runner import BenchRunner
 from localslm.bench.spec import BenchSpec
 from localslm.bench.stats import Interval, paired_bootstrap, rank_with_ties
-from localslm.bench.suites import available, load
+from localslm.bench.suites import Suite, TaskItem, available, load, save
 from localslm.db import new_id, query
 from localslm.db import write as db_write
 from localslm.inference.lock import LeaseBusy
@@ -35,6 +38,9 @@ class RunRequest(BaseModel):
     suites: list[str]
     repeats: int = Field(default=1, ge=1, le=10)
     think_levels: list[str] = Field(default_factory=lambda: ["false"])
+    # More than one temperature turns the run into a determinism study: the
+    # same items, the same seed, sampled differently.
+    temperatures: list[float] = Field(default_factory=lambda: [0.0])
     label: str = ""
 
 
@@ -66,6 +72,77 @@ async def suite_items(name: str) -> dict:
     return {"name": name, "items": [i.to_dict() for i in suite.items]}
 
 
+class FromSessionRequest(BaseModel):
+    name: str = ""
+    task: str = "contains"
+    include_answers: bool = True
+
+
+@router.post("/suites/from-session/{session_id}")
+async def suite_from_session(session_id: str, body: FromSessionRequest) -> dict:
+    """Turn a conversation into a reusable suite.
+
+    This is the payoff for chat and benchmarks sharing one table: the prompts
+    you actually type are more representative of your workload than any public
+    test set, and they are already stored.
+
+    Items land as `verified_by: "llm"` — the assistant's own reply becomes the
+    expected answer, which is a starting point, not a ground truth. Only
+    human-verified items should ever gate anything.
+    """
+    st = get_state()
+    rows = query(
+        st.conn,
+        "SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY idx",
+        (session_id,),
+    )
+    if not rows:
+        raise HTTPException(404, "no such session, or it has no messages")
+
+    if body.task not in GRADERS:
+        raise HTTPException(422, f"unknown grader {body.task!r}")
+
+    name = re.sub(r"[^a-z0-9_-]+", "-", (body.name or f"session-{session_id[:8]}").lower())
+    if name in available():
+        raise HTTPException(
+            409, {"error": "exists", "message": f"suite {name!r} already exists"}
+        )
+
+    items: list[TaskItem] = []
+    pending: str | None = None
+    for row in rows:
+        if row["role"] == "user":
+            pending = row["content"]
+        elif pending:
+            items.append(
+                TaskItem(
+                    id=f"{name}-{len(items) + 1}",
+                    task=body.task,
+                    prompt=pending,
+                    expected=(row["content"] or "").strip()[:500]
+                    if body.include_answers
+                    else None,
+                    category="from_chat",
+                    verified_by="llm",
+                    notes=f"captured from chat session {session_id}",
+                )
+            )
+            pending = None
+
+    if not items:
+        raise HTTPException(422, "no complete question/answer pairs in that session")
+
+    suite = Suite(name=name, items=items)
+    path = save(suite)
+    return {
+        "name": name,
+        "items": len(items),
+        "path": str(path),
+        "verified": 0,
+        "hash": suite.content_hash(),
+    }
+
+
 @router.post("/bench/runs")
 async def start_run(body: RunRequest) -> dict:
     st = get_state()
@@ -94,6 +171,7 @@ async def start_run(body: RunRequest) -> dict:
         models=body.models,
         suites=suites,
         think_levels=levels,
+        temperatures=body.temperatures or [0.0],
         repeats=body.repeats,
         warmups=1,
         thinking_capable=capable,
@@ -267,6 +345,177 @@ async def delete_run(run_id: str) -> dict:
         st.conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
     _ACTIVE.pop(run_id, None)
     return {"deleted": run_id, **counted}
+
+
+@router.get("/runs/{run_id}/thinking")
+async def run_thinking(run_id: str) -> dict:
+    """What reasoning cost, and whether it bought anything.
+
+    The question the whole project is pointed at. Each think level becomes a
+    point of (thinking tokens spent, accuracy), so the curve shows directly
+    whether more reasoning is buying correctness or just latency.
+
+    `ttfat` is reported beside `ttft` because for these models they differ by
+    tens of seconds, and only the second describes what a user waits for.
+    """
+    st = get_state()
+    rows = query(
+        st.conn,
+        """SELECT res.cell_key, res.model, res.score, res.item_id,
+                  req.think, req.thinking_tokens, req.answer_tokens,
+                  req.ttft_ms, req.ttfat_ms, req.total_ms, req.output_tokens
+           FROM results res
+           JOIN requests req ON req.id = res.request_id
+           WHERE res.run_id = ? AND req.excluded = 0""",
+        (run_id,),
+    )
+    if not rows:
+        return {"run_id": run_id, "points": [], "note": "No graded results for this run."}
+
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row["cell_key"], []).append(row)
+
+    # Compare on the items every cell actually completed.
+    #
+    # Long reasoning runs push this machine into swap, and those requests are
+    # excluded — correctly — which leaves each cell with a different subset of
+    # items. Averaging over whatever survived would compare think=low on the
+    # items it happened to finish against think=off on all of them, and read
+    # the difference as a property of reasoning rather than of which questions
+    # got dropped.
+    per_cell_items = {
+        key: {r["item_id"] for r in entries} for key, entries in grouped.items()
+    }
+    shared = set.intersection(*per_cell_items.values()) if per_cell_items else set()
+    all_items = set().union(*per_cell_items.values()) if per_cell_items else set()
+
+    def avg(entries: list, key: str) -> float | None:
+        vals = [e[key] for e in entries if e[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    points = []
+    for cell_key, entries in grouped.items():
+        paired = [e for e in entries if e["item_id"] in shared] or entries
+        n = len(paired)
+        thinking = [e["thinking_tokens"] or 0 for e in paired]
+        answering = [e["answer_tokens"] or 0 for e in paired]
+        overthought = sum(
+            1 for t, a in zip(thinking, answering, strict=True) if a and t > 3 * a
+        )
+        points.append(
+            {
+                "cell_key": cell_key,
+                "model": paired[0]["model"],
+                "think": paired[0]["think"],
+                "n": n,
+                "n_attempted": len(entries),
+                "accuracy": sum(e["score"] or 0 for e in paired) / n,
+                "thinking_tokens": sum(thinking) / n,
+                "answer_tokens": sum(answering) / n,
+                "think_ratio": (
+                    sum(thinking) / (sum(thinking) + sum(answering))
+                    if sum(thinking) + sum(answering)
+                    else 0.0
+                ),
+                "overthink_rate": overthought / n,
+                "ttft_ms": avg(paired, "ttft_ms"),
+                "ttfat_ms": avg(paired, "ttfat_ms"),
+                "total_ms": avg(paired, "total_ms"),
+            }
+        )
+
+    points.sort(key=lambda p: (p["model"], p["thinking_tokens"]))
+    dropped = len(all_items) - len(shared)
+    return {
+        "run_id": run_id,
+        "points": points,
+        "paired": bool(shared),
+        "n_shared_items": len(shared),
+        "n_dropped_items": dropped,
+        "note": (
+            f"Scored on the {len(shared)} items every setting completed. "
+            f"{dropped} more were attempted by some settings but excluded "
+            f"(usually the machine swapping during long reasoning), and "
+            f"including them would compare different question sets."
+        )
+        if dropped
+        else None,
+    }
+
+
+@router.get("/runs/{run_id}/determinism")
+async def run_determinism(run_id: str) -> dict:
+    """How stable each cell's output was across repeated samples.
+
+    Needs repeats > 1 to say anything. Grouped per cell so a temperature axis
+    reads directly: the same items at t=0 and t=0.7 become two rows whose
+    duplicate rates can be compared.
+    """
+    st = get_state()
+    rows = query(
+        st.conn,
+        """SELECT res.cell_key, res.item_id, res.model, res.score,
+                  req.output_text, req.temperature, req.think
+           FROM results res
+           JOIN requests req ON req.id = res.request_id
+           WHERE res.run_id = ? AND req.excluded = 0
+           ORDER BY res.cell_key, res.item_id""",
+        (run_id,),
+    )
+
+    per_cell: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        cell = per_cell.setdefault(
+            row["cell_key"],
+            {
+                "cell_key": row["cell_key"],
+                "model": row["model"],
+                "temperature": row["temperature"],
+                "think": row["think"],
+                "items": {},
+            },
+        )
+        cell["items"].setdefault(row["item_id"], {"texts": [], "scores": []})
+        cell["items"][row["item_id"]]["texts"].append(row["output_text"] or "")
+        cell["items"][row["item_id"]]["scores"].append(row["score"])
+
+    out = []
+    for cell in per_cell.values():
+        per_item = {
+            item_id: stability(v["texts"], v["scores"]).as_dict()
+            for item_id, v in cell["items"].items()
+            if len(v["texts"]) > 1
+        }
+        if not per_item:
+            continue
+        rates = [m["exact_duplicate_rate"] for m in per_item.values()]
+        out.append(
+            {
+                "cell_key": cell["cell_key"],
+                "model": cell["model"],
+                "temperature": cell["temperature"],
+                "think": cell["think"],
+                "n_items": len(per_item),
+                "samples_per_item": max(len(v["texts"]) for v in cell["items"].values()),
+                "mean_duplicate_rate": sum(rates) / len(rates),
+                "fully_deterministic_items": sum(
+                    1 for m in per_item.values() if m["fully_deterministic"]
+                ),
+                "items": per_item,
+            }
+        )
+
+    return {
+        "run_id": run_id,
+        "cells": sorted(out, key=lambda c: -c["mean_duplicate_rate"]),
+        # Says plainly why the answer is empty, rather than rendering a blank panel.
+        "note": (
+            None
+            if out
+            else "Determinism needs repeats > 1 — this run sampled each item once."
+        ),
+    }
 
 
 @router.get("/runs/{run_id}/results")
