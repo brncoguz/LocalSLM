@@ -29,7 +29,7 @@ jobs:
       # Smallest useful model: this verifies the protocol, not the model.
       OLLAMA_MODEL: llama3.2:1b
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
