@@ -1,6 +1,8 @@
 /** Typed client. Shapes mirror the Pydantic/sqlite rows on the backend;
  *  when they drift, this file is the one place to fix. */
 
+import { demoGet, demoRefuse, isDemo } from "@/lib/demo";
+
 export interface Health {
   ok: boolean;
   runtime: { ok: boolean; version?: string; error?: string; endpoint: string };
@@ -200,6 +202,13 @@ export interface ResultRow {
 }
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
+  if (isDemo) {
+    const method = (init?.method ?? "GET").toUpperCase();
+    // Reads come from the fixture; anything that would mutate is refused by
+    // name, so the banner says what it would have done rather than "failed".
+    if (method !== "GET") demoRefuse(describeWrite(method, path));
+    return demoGet<T>(path);
+  }
   const r = await fetch(`/api${path}`, init);
   if (!r.ok) {
     let detail: unknown;
@@ -280,6 +289,20 @@ export const api = {
 };
 
 
+/** Human-readable name for a write, used in demo-mode refusals. */
+function describeWrite(method: string, path: string): string {
+  if (path.startsWith("/models/pull")) return "Pulling a model";
+  if (path.includes("/warm")) return "Loading a model into memory";
+  if (path.includes("/unload")) return "Unloading a model";
+  if (method === "DELETE" && path.startsWith("/models")) return "Deleting a model";
+  if (method === "DELETE" && path.startsWith("/runs")) return "Deleting a run";
+  if (method === "DELETE" && path.startsWith("/sessions")) return "Deleting a conversation";
+  if (path.startsWith("/bench/runs")) return "Starting a benchmark";
+  if (path.startsWith("/suites/from-session")) return "Saving a conversation as a suite";
+  if (path === "/chat") return "Chatting";
+  return "That action";
+}
+
 export type SSEHandler = (event: string, data: any) => void;
 
 /** Parse an SSE body, dispatching each frame.
@@ -322,6 +345,7 @@ export async function streamPost(
   onEvent: SSEHandler,
   signal?: AbortSignal,
 ): Promise<void> {
+  if (isDemo) demoRefuse(describeWrite("POST", path));
   const res = await fetch(`/api${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -339,6 +363,7 @@ export async function streamGet(
   onEvent: SSEHandler,
   signal?: AbortSignal,
 ): Promise<void> {
+  if (isDemo) demoRefuse("Watching a live benchmark");
   const res = await fetch(`/api${path}`, { signal });
   if (!res.ok) throw await failure(res);
   await readSSE(res, onEvent);

@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { Activity, BarChart3, Boxes, FlaskConical, MessageSquare } from "lucide-react";
 import { api, type Health, type ModelsResponse } from "@/lib/api";
 import { MachineStrip } from "@/components/MachineStrip";
+import { DemoBanner } from "@/components/DemoBanner";
 import { Chat } from "@/pages/Chat";
 import { Models } from "@/pages/Models";
 import { Stats } from "@/pages/Stats";
 import { Bench } from "@/pages/Bench";
 import { cn } from "@/lib/utils";
+import { isDemo } from "@/lib/demo";
 
 type Tab = "chat" | "models" | "bench" | "stats";
 
@@ -34,6 +36,9 @@ export default function App() {
 
   useEffect(() => {
     void refresh();
+    // Nothing changes in demo mode — the fixture is static, so polling would
+    // only burn cycles re-reading the same object.
+    if (isDemo) return;
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [refresh]);
@@ -62,6 +67,7 @@ export default function App() {
         </nav>
       </header>
 
+      <DemoBanner />
       <MachineStrip health={health} />
 
       <main className="min-h-0 flex-1">

@@ -53,6 +53,16 @@ Sample sizes are small, so treat these as early signal. Where a claim is backed 
 
 Some models in the table have since been deleted locally. Their measurements survive because the `requests` rows outlive the weights, which is deliberate.
 
+## Live demo
+
+**[brncoguz.github.io/LocalSLM](https://brncoguz.github.io/LocalSLM/)** — the real
+dashboard running on recorded measurements from an M1 Pro, so you can look
+around without installing anything. Chat, model pulls and benchmark runs need a
+local Ollama and are disabled there; everything else is live data from the runs
+described below.
+
+Regenerate the snapshot after new runs with `make demo-data`.
+
 ## Getting started
 
 Requires [Ollama](https://ollama.com) running locally and Python 3.13.

@@ -11,6 +11,7 @@ import { DeterminismPanel } from "@/components/charts/DeterminismPanel";
 import { ThinkingCurve } from "@/components/charts/ThinkingCurve";
 import { TtftVsTtfat } from "@/components/charts/TtftVsTtfat";
 import { cn, modelColor } from "@/lib/utils";
+import { isDemo } from "@/lib/demo";
 
 type Progress = { done: number; total: number; cell: string; item: string; passed: boolean };
 
@@ -151,7 +152,8 @@ export function Bench({ models }: { models: string[] }) {
                 ~{estimate.toLocaleString()} requests
               </span>
               <Button onClick={() => void start()}
-                disabled={!!running || !pickedModels.length || !pickedSuites.length || !think.length || !temps.length}>
+                title={isDemo ? "Needs a local Ollama — this is a recorded demo" : undefined}
+                disabled={isDemo || !!running || !pickedModels.length || !pickedSuites.length || !think.length || !temps.length}>
                 {running ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
                 {running ? "Running" : "Run"}
               </Button>

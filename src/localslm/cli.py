@@ -8,6 +8,7 @@ under memory pressure is comparable to one that wasn't — is the whole ethic.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import typer
 from rich.console import Console
@@ -133,6 +134,69 @@ def models() -> None:
         await rt.aclose()
 
     asyncio.run(main())
+
+
+@app.command("export-demo")
+def export_demo(
+    out: str = typer.Option("ui/src/fixtures/demo.json", help="Where to write the fixture"),
+) -> None:
+    """Snapshot the API into a fixture the static demo can serve.
+
+    Nobody reviewing this repository is going to install Ollama and pull several
+    gigabytes of weights, so the published demo has to run on recorded data.
+
+    The snapshot is taken by calling the real application through a test client
+    rather than by re-querying the database. Any hand-written export would drift
+    from what the API actually serves the moment a route changed, and a demo
+    that disagrees with the app is worse than no demo.
+    """
+    from fastapi.testclient import TestClient
+
+    from localslm.api.main import app as fastapi_app
+    from localslm.config import path as repo_path
+
+    target = repo_path(*out.split("/"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    snapshot: dict[str, object] = {}
+    with TestClient(fastapi_app) as client:
+
+        def capture(path: str) -> object | None:
+            r = client.get(path)
+            if r.status_code != 200:
+                console.print(f"  [yellow]skipped {path} ({r.status_code})[/yellow]")
+                return None
+            snapshot[path] = r.json()
+            return r.json()
+
+        for path in (
+            "/api/health",
+            "/api/models",
+            "/api/suites",
+            "/api/stats/summary",
+            "/api/stats/timeline?limit=1000",
+            "/api/stats/disagreements?limit=40",
+            "/api/runs?limit=50",
+        ):
+            capture(path)
+
+        runs = snapshot.get("/api/runs?limit=50") or []
+        # Every completed run, so the demo's run list expands like the real one.
+        for run in [r for r in runs if r["status"] in ("done", "aborted")][:8]:
+            rid = run["id"]
+            for suffix in ("", "/thinking", "/determinism"):
+                capture(f"/api/runs/{rid}{suffix}")
+
+        for model in (snapshot.get("/api/models") or {}).get("installed", []):
+            capture(f"/api/models/{model['name']}/history?limit=100")
+            capture(f"/api/models/{model['name']}/detail")
+
+    target.write_text(json.dumps(snapshot, indent=1, sort_keys=True))
+    size = target.stat().st_size
+    console.print(
+        f"\n  wrote [bold]{len(snapshot)}[/bold] endpoints to {out} "
+        f"({size / 1024:.0f} KB)\n"
+    )
 
 
 @app.command()

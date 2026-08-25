@@ -41,6 +41,12 @@ models: ## Show installed models with their live state
 doctor: ## Check the host: ollama, disk, memory, power source
 	$(PY) -m localslm.cli doctor
 
+demo-data: ## Snapshot the API into the fixture the published demo serves
+	$(PY) -m localslm.cli export-demo
+
+demo: demo-data ## Build and preview the static demo locally
+	cd ui && VITE_DEMO=1 npm run build && npm run preview
+
 ##@ Quality
 
 test: ## Run the offline test suite
@@ -69,4 +75,4 @@ help: ## Show this help
 		/^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: install serve api ui bench models doctor test test-all lint fmt clean help
+.PHONY: install serve api ui bench models doctor demo-data demo test test-all lint fmt clean help
